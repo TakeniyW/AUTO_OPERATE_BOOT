@@ -1,10 +1,12 @@
-"""Twitter 批量登录 + MetaMask 钱包初始化。
+"""Twitter 批量登录 + MetaMask 钱包初始化（CLI 入口）。
 
 用法:
     python main.py                          # 使用同目录 config.yaml
     python main.py --config config.yaml --limit 2
     python main.py --skip-wallet            # 只登录 Twitter
     python main.py --excel accounts.xlsx    # 临时指定 token 表
+
+GUI 入口:  python gui.py  （Windows 上双击 gui.py 即可）
 
 脚本必须运行在安装了 ixBrowser 客户端的 Windows 机器上。
 """
@@ -14,9 +16,11 @@ import argparse
 import logging
 import random
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Dict, List
+from queue import Queue
+from typing import Dict, List, Optional
 
 from modules.browser import BrowserManager, IxBrowserError
 from modules.config import Settings, load_settings
@@ -37,31 +41,63 @@ from modules import tw_login, wallet
 log = logging.getLogger("x-batch")
 
 
-def setup_logging(settings: Settings) -> None:
+# ----------------------------------------------------------------- 日志系统
+class QueueLogHandler(logging.Handler):
+    """把 log 记录推到一个 Queue，GUI 线程从 Queue 读出来显示。"""
+
+    def __init__(self, queue: Queue):
+        super().__init__()
+        self._q = queue
+        self.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._q.put(self.format(record))
+        except Exception:
+            pass
+
+
+def setup_logging(
+    settings: Settings,
+    gui_queue: Optional[Queue] = None,
+) -> None:
     log_dir = Path(settings.output.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / f"run_{time.strftime('%Y%m%d_%H%M%S')}.log"
 
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.INFO)
+
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(formatter)
+    root.addHandler(console)
+
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setFormatter(formatter)
-
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    root.addHandler(console)
     root.addHandler(file_handler)
 
+    if gui_queue is not None:
+        root.addHandler(QueueLogHandler(gui_queue))
 
+
+# ------------------------------------------------------------------ 辅助
 def mask(token: str) -> str:
     return f"***{token[-4:]}" if len(token) > 4 else "***"
 
 
-def human_delay(settings: Settings) -> None:
+def human_delay(settings: Settings, stop_event: Optional[threading.Event] = None) -> None:
     low = min(settings.twitter.delay_min, settings.twitter.delay_max)
     high = max(settings.twitter.delay_min, settings.twitter.delay_max)
-    time.sleep(random.uniform(low, high))
+    target = random.uniform(low, high)
+    if stop_event is None:
+        time.sleep(target)
+        return
+    # 支持中途停止
+    end = time.time() + target
+    while time.time() < end and not stop_event.is_set():
+        time.sleep(0.2)
 
 
 def handle_wallet(
@@ -107,6 +143,7 @@ def handle_wallet(
     store.save()
 
 
+# ---------------------------------------------------------------- 单窗口流程
 def process_profile(
     bm: BrowserManager,
     profile: Dict[str, str],
@@ -114,6 +151,7 @@ def process_profile(
     settings: Settings,
     store: ExcelStore,
     stats: Dict[str, int],
+    stop_event: Optional[threading.Event] = None,
 ) -> None:
     profile_id = profile["id"]
     profile_name = profile["name"]
@@ -135,6 +173,9 @@ def process_profile(
     error_tries = 0
     try:
         while pending and tried < settings.twitter.max_tokens_per_profile:
+            if stop_event is not None and stop_event.is_set():
+                log.warning("  收到停止信号，结束当前窗口")
+                return
             row = pending[0]
             tried += 1
             log.info("  尝试 token %s（第 %d 个，Excel 行 %d）", mask(row.token), tried, row.sheet_row)
@@ -188,7 +229,7 @@ def process_profile(
                 stats["invalid"] += 1
                 error_tries = 0
                 log.warning("  token 失效: %s", result.detail)
-                human_delay(settings)
+                human_delay(settings, stop_event)
                 continue
 
             if result.status == tw_login.RESTRICTED:
@@ -206,14 +247,21 @@ def process_profile(
                 stats["restricted"] += 1
                 error_tries = 0
                 log.warning("  账号受限，换下一个 token: %s", result.detail)
-                human_delay(settings)
+                human_delay(settings, stop_event)
                 continue
 
             # 网络/加载异常：同一 token 先重试，仍失败则放弃该窗口
             error_tries += 1
             if error_tries <= settings.twitter.retry_per_token:
-                log.warning("  加载异常，%d 秒后重试: %s", 5, result.detail)
-                time.sleep(5)
+                log.warning("  加载异常，5 秒后重试: %s", result.detail)
+                # 分段 sleep 支持停止
+                if stop_event is not None:
+                    for _ in range(10):
+                        if stop_event.is_set():
+                            break
+                        time.sleep(0.5)
+                else:
+                    time.sleep(5)
                 continue
 
             store.update(
@@ -233,31 +281,21 @@ def process_profile(
     finally:
         bm.stop_playwright()
         if not settings.ixbrowser.keep_window_open:
-            bm.close(profile_id)
-            log.info("  窗口已关闭")
+            try:
+                bm.close(profile_id)
+                log.info("  窗口已关闭")
+            except Exception:
+                pass
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="ixBrowser 推特批量登录 + MetaMask 初始化")
-    parser.add_argument("--config", default="config.yaml", help="配置文件路径")
-    parser.add_argument("--excel", default="", help="临时覆盖 token 表路径")
-    parser.add_argument("--limit", type=int, default=-1, help="本次最多处理多少个窗口")
-    parser.add_argument("--skip-wallet", action="store_true", help="本次不处理钱包")
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = parse_args()
-    settings = load_settings(args.config)
-    if args.excel:
-        settings.excel.path = args.excel
-    if args.limit >= 0:
-        settings.ixbrowser.profile_limit = args.limit
-    if args.skip_wallet:
-        settings.wallet.enabled = False
-
-    setup_logging(settings)
-    log.info("配置: %s", Path(args.config).resolve())
+# ---------------------------------------------------------------- 总流程
+def run(
+    settings: Settings,
+    gui_queue: Optional[Queue] = None,
+    stop_event: Optional[threading.Event] = None,
+) -> int:
+    """核心流程：CLI 和 GUI 都调用这个函数。返回 0 成功 / 非 0 失败。"""
+    setup_logging(settings, gui_queue)
 
     try:
         store = ExcelStore(settings.excel)
@@ -293,9 +331,12 @@ def main() -> int:
     started = time.time()
     try:
         for profile in profiles:
+            if stop_event is not None and stop_event.is_set():
+                log.warning("用户请求停止，保存后退出 ...")
+                break
             if not pending:
                 break
-            process_profile(bm, profile, pending, settings, store, stats)
+            process_profile(bm, profile, pending, settings, store, stats, stop_event)
     except KeyboardInterrupt:
         log.warning("收到中断，正在保存 ...")
     finally:
@@ -315,7 +356,29 @@ def main() -> int:
     log.info("表格统计: %s", store.summary())
     log.info("结果文件: %s", store.path.resolve())
     log.info("剩余未处理 token: %d 个", len(pending))
-    return 0
+    return 0 if stats["ok"] + stats["invalid"] + stats["restricted"] > 0 else 1
+
+
+# ------------------------------------------------------------------ CLI
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="ixBrowser 推特批量登录 + MetaMask 初始化")
+    parser.add_argument("--config", default="config.yaml", help="配置文件路径")
+    parser.add_argument("--excel", default="", help="临时覆盖 token 表路径")
+    parser.add_argument("--limit", type=int, default=-1, help="本次最多处理多少个窗口")
+    parser.add_argument("--skip-wallet", action="store_true", help="本次不处理钱包")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    settings = load_settings(args.config)
+    if args.excel:
+        settings.excel.path = args.excel
+    if args.limit >= 0:
+        settings.ixbrowser.profile_limit = args.limit
+    if args.skip_wallet:
+        settings.wallet.enabled = False
+    return run(settings)
 
 
 if __name__ == "__main__":

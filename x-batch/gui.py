@@ -1,0 +1,510 @@
+"""桌面 GUI：ixBrowser 批量推特登录 + MetaMask 钱包初始化。
+
+启动:   python gui.py
+打包exe: pip install pyinstaller && pyinstaller -F -w --name x-batch gui.py
+"""
+from __future__ import annotations
+
+import queue
+import threading
+import time
+import tkinter as tk
+from pathlib import Path
+from queue import Empty
+from tkinter import filedialog, messagebox, ttk
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    yaml = None  # 启动后再提示
+
+from main import run
+from modules.config import Settings, load_settings
+
+APP_TITLE = "x-batch · ixBrowser 批量推特登录 + 钱包初始化"
+
+# 颜色
+COLOR_RUNNING = "#c0392b"
+COLOR_IDLE = "#27ae60"
+
+
+class App(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title(APP_TITLE)
+        self.geometry("960x720")
+        self.minsize(840, 620)
+
+        self._workdir = Path(__file__).parent.resolve()
+        self._config_path = self._workdir / "config.yaml"
+
+        self._worker: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._log_queue: queue.Queue = queue.Queue()
+
+        self._settings = load_settings(str(self._config_path))
+        self._is_running = False
+
+        self._build_widgets()
+        self._load_settings_to_ui()
+        self.after(200, self._drain_log_queue)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ----------------------------------------------------------- UI 构建
+    def _build_widgets(self) -> None:
+        # 顶部：状态栏 + 开始/停止
+        top = ttk.Frame(self, padding=(10, 10, 10, 0))
+        top.pack(fill=tk.X)
+
+        self._status_dot = tk.Label(top, text="●", fg=COLOR_IDLE, font=("Consolas", 14))
+        self._status_dot.pack(side=tk.LEFT)
+        self._status_label = ttk.Label(top, text="空闲", font=("", 12))
+        self._status_label.pack(side=tk.LEFT, padx=(6, 0))
+
+        self._start_btn = ttk.Button(top, text="▶ 开始", width=10, command=self._on_start)
+        self._start_btn.pack(side=tk.RIGHT)
+        self._stop_btn = ttk.Button(top, text="■ 停止", width=10, command=self._on_stop, state=tk.DISABLED)
+        self._stop_btn.pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(top, text="💾 保存配置", command=self._on_save_cfg).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(top, text="📂 加载配置", command=self._on_load_cfg).pack(side=tk.RIGHT, padx=(0, 8))
+
+        # 主体：参数 Notebook (左 50%) + 日志/统计 (右 50%)
+        body = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
+        body.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # ---- 左：参数
+        left = ttk.Frame(body, padding=6)
+        body.add(left, weight=1)
+        nb = ttk.Notebook(left)
+        nb.pack(fill=tk.BOTH, expand=True)
+
+        self._tab_excel = self._build_excel_tab(nb)
+        self._tab_ix = self._build_ix_tab(nb)
+        self._tab_tw = self._build_tw_tab(nb)
+        self._tab_wallet = self._build_wallet_tab(nb)
+
+        nb.add(self._tab_excel, text="① Excel")
+        nb.add(self._tab_ix, text="② ixBrowser")
+        nb.add(self._tab_tw, text="③ Twitter")
+        nb.add(self._tab_wallet, text="④ 钱包")
+
+        # ---- 右：统计 + 日志
+        right = ttk.Frame(body, padding=(6, 6, 0, 6))
+        body.add(right, weight=1)
+
+        stats_frame = ttk.LabelFrame(right, text="实时统计", padding=8)
+        stats_frame.pack(fill=tk.X)
+
+        self._stat_vars = {}
+        for key, label in [
+            ("ok", "✅ 登录成功"),
+            ("invalid", "❌ token 失效"),
+            ("restricted", "⚠️ 账号受限"),
+            ("error", "❗ 异常放弃"),
+            ("window_error", "🔧 窗口失败"),
+        ]:
+            row = ttk.Frame(stats_frame)
+            row.pack(fill=tk.X, pady=1)
+            ttk.Label(row, text=label, width=14).pack(side=tk.LEFT)
+            var = tk.StringVar(value="0")
+            ttk.Label(row, textvariable=var, foreground="#2980b9", font=("", 12, "bold")).pack(side=tk.LEFT)
+            self._stat_vars[key] = var
+
+        log_frame = ttk.LabelFrame(right, text="运行日志", padding=6)
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self._log_text = tk.Text(log_frame, wrap="word", height=18, state=tk.DISABLED,
+                                 font=("Consolas", 10), background="#fafafa")
+        self._log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb = ttk.Scrollbar(log_frame, command=self._log_text.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._log_text.config(yscrollcommand=sb.set)
+        self._log_text.tag_configure("INFO", foreground="#2c3e50")
+        self._log_text.tag_configure("WARNING", foreground="#d35400")
+        self._log_text.tag_configure("ERROR", foreground="#c0392b")
+
+    # -------------------------------------------------------- 各 Tab 构建
+    def _build_excel_tab(self, parent: ttk.Widget) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=10)
+        f.columnconfigure(1, weight=1)
+
+        ttk.Label(f, text="token 表路径").grid(row=0, column=0, sticky="w", pady=4)
+        self._excel_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self._excel_var).grid(row=0, column=1, sticky="ew", pady=4, padx=4)
+        ttk.Button(f, text="浏览…", command=self._pick_excel).grid(row=0, column=2, pady=4)
+
+        ttk.Label(f, text="token 列名").grid(row=1, column=0, sticky="w", pady=4)
+        self._token_col_var = tk.StringVar(value="auth_token")
+        ttk.Entry(f, textvariable=self._token_col_var).grid(row=1, column=1, sticky="ew", pady=4, padx=4)
+
+        ttk.Label(f, text="ct0 列名(可空)").grid(row=2, column=0, sticky="w", pady=4)
+        self._ct0_col_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self._ct0_col_var).grid(row=2, column=1, sticky="ew", pady=4, padx=4)
+
+        self._backup_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(f, text="首次运行前备份原表 (.bak)", variable=self._backup_var).grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=4
+        )
+
+        ttk.Label(f, text="提示: 表头必须包含 token 列；处理完成后会自动追加 状态/窗口/用户名/钱包 等列。",
+                  foreground="#7f8c8d").grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        return f
+
+    def _build_ix_tab(self, parent: ttk.Widget) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=10)
+        f.columnconfigure(1, weight=1)
+
+        ttk.Label(f, text="ixBrowser API 地址").grid(row=0, column=0, sticky="w", pady=4)
+        api_row = ttk.Frame(f); api_row.grid(row=0, column=1, sticky="ew", pady=4, padx=4)
+        self._ix_host_var = tk.StringVar(value="127.0.0.1")
+        self._ix_port_var = tk.StringVar(value="53200")
+        ttk.Entry(api_row, textvariable=self._ix_host_var, width=14).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(api_row, text=":").pack(side=tk.LEFT)
+        ttk.Entry(api_row, textvariable=self._ix_port_var, width=7).pack(side=tk.LEFT)
+
+        ttk.Button(f, text="测试连接", command=self._test_ix).grid(row=0, column=2, pady=4)
+
+        ttk.Label(f, text="窗口名称过滤").grid(row=1, column=0, sticky="w", pady=4)
+        self._ix_filter_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self._ix_filter_var).grid(row=1, column=1, sticky="ew", pady=4, padx=4)
+
+        ttk.Label(f, text="本次处理窗口数").grid(row=2, column=0, sticky="w", pady=4)
+        self._ix_limit_var = tk.StringVar(value="1")
+        ttk.Entry(f, textvariable=self._ix_limit_var, width=10).grid(row=2, column=1, sticky="w", pady=4, padx=4)
+        ttk.Label(f, text="(0=全部)", foreground="#7f8c8d").grid(row=2, column=2, sticky="w", pady=4)
+
+        self._keep_open_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f, text="完成后保留窗口(调试用)", variable=self._keep_open_var).grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=4
+        )
+        return f
+
+    def _build_tw_tab(self, parent: ttk.Widget) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=10)
+        f.columnconfigure(1, weight=1)
+
+        ttk.Label(f, text="登录超时 (秒)").grid(row=0, column=0, sticky="w", pady=4)
+        self._tw_timeout_var = tk.StringVar(value="25")
+        ttk.Entry(f, textvariable=self._tw_timeout_var, width=10).grid(row=0, column=1, sticky="w", pady=4, padx=4)
+
+        ttk.Label(f, text="单窗口最多尝试 token 数").grid(row=1, column=0, sticky="w", pady=4)
+        self._tw_max_var = tk.StringVar(value="20")
+        ttk.Entry(f, textvariable=self._tw_max_var, width=10).grid(row=1, column=1, sticky="w", pady=4, padx=4)
+
+        ttk.Label(f, text="同 token 网络异常重试次数").grid(row=2, column=0, sticky="w", pady=4)
+        self._tw_retry_var = tk.StringVar(value="1")
+        ttk.Entry(f, textvariable=self._tw_retry_var, width=10).grid(row=2, column=1, sticky="w", pady=4, padx=4)
+
+        ttk.Label(f, text="动作间随机延迟").grid(row=3, column=0, sticky="w", pady=4)
+        delay_row = ttk.Frame(f); delay_row.grid(row=3, column=1, sticky="w", pady=4, padx=4)
+        self._tw_delay_min_var = tk.StringVar(value="3.0")
+        self._tw_delay_max_var = tk.StringVar(value="6.0")
+        ttk.Entry(delay_row, textvariable=self._tw_delay_min_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(delay_row, text="~").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(delay_row, textvariable=self._tw_delay_max_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(delay_row, text="秒", foreground="#7f8c8d").pack(side=tk.LEFT, padx=4)
+        return f
+
+    def _build_wallet_tab(self, parent: ttk.Widget) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=10)
+        f.columnconfigure(1, weight=1)
+
+        self._wallet_enabled_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(f, text="处理钱包", variable=self._wallet_enabled_var).grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=4
+        )
+
+        ttk.Label(f, text="模式").grid(row=1, column=0, sticky="w", pady=4)
+        self._wallet_mode_var = tk.StringVar(value="auto")
+        mode_row = ttk.Frame(f); mode_row.grid(row=1, column=1, columnspan=2, sticky="w", pady=4, padx=4)
+        for val, label in [("auto", "自动导入 (推荐)"), ("manual", "人工操作后回填"), ("skip", "跳过钱包")]:
+            ttk.Radiobutton(mode_row, text=label, value=val, variable=self._wallet_mode_var).pack(side=tk.LEFT, padx=4)
+
+        ttk.Label(f, text="MetaMask 扩展 ID").grid(row=2, column=0, sticky="w", pady=4)
+        self._wallet_ext_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self._wallet_ext_var).grid(row=2, column=1, sticky="ew", pady=4, padx=4)
+        ttk.Label(f, text="(可留空自动探测)", foreground="#7f8c8d").grid(row=2, column=2, sticky="w", pady=4)
+
+        ttk.Label(f, text="钱包密码前缀").grid(row=3, column=0, sticky="w", pady=4)
+        self._wallet_pfx_var = tk.StringVar(value="Wx")
+        ttk.Entry(f, textvariable=self._wallet_pfx_var, width=10).grid(row=3, column=1, sticky="w", pady=4, padx=4)
+
+        ttk.Label(f, text="密码总长").grid(row=4, column=0, sticky="w", pady=4)
+        self._wallet_plen_var = tk.StringVar(value="14")
+        ttk.Entry(f, textvariable=self._wallet_plen_var, width=10).grid(row=4, column=1, sticky="w", pady=4, padx=4)
+
+        self._wallet_fallback_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(f, text="自动失败时转人工", variable=self._wallet_fallback_var).grid(
+            row=5, column=0, columnspan=3, sticky="w", pady=4
+        )
+
+        ttk.Label(f, text="提示: 脚本会先在 Python 本地生成 12 词助记词并离线派生地址，再自动点 MetaMask 完成导入。",
+                  foreground="#7f8c8d", wraplength=380, justify="left").grid(
+            row=6, column=0, columnspan=3, sticky="w", pady=(10, 0)
+        )
+        return f
+
+    # --------------------------------------------------- 设置 <-> UI
+    def _load_settings_to_ui(self) -> None:
+        s = self._settings
+        self._excel_var.set(str(Path(s.excel.path)))
+        self._token_col_var.set(s.excel.token_column)
+        self._ct0_col_var.set(s.excel.ct0_column)
+        self._backup_var.set(s.excel.backup)
+
+        self._ix_host_var.set(s.ixbrowser.host)
+        self._ix_port_var.set(str(s.ixbrowser.port))
+        self._ix_filter_var.set(s.ixbrowser.profile_name_filter)
+        self._ix_limit_var.set(str(s.ixbrowser.profile_limit))
+        self._keep_open_var.set(s.ixbrowser.keep_window_open)
+
+        self._tw_timeout_var.set(str(s.twitter.login_timeout))
+        self._tw_max_var.set(str(s.twitter.max_tokens_per_profile))
+        self._tw_retry_var.set(str(s.twitter.retry_per_token))
+        self._tw_delay_min_var.set(str(s.twitter.delay_min))
+        self._tw_delay_max_var.set(str(s.twitter.delay_max))
+
+        self._wallet_enabled_var.set(s.wallet.enabled)
+        self._wallet_mode_var.set(s.wallet.mode)
+        self._wallet_ext_var.set(s.wallet.extension_id)
+        self._wallet_pfx_var.set(s.wallet.password_prefix)
+        self._wallet_plen_var.set(str(s.wallet.password_length))
+        self._wallet_fallback_var.set(s.wallet.manual_fallback)
+
+    def _collect_settings(self) -> Settings:
+        """从 GUI 各变量构建一个新的 Settings，保留其他未暴露字段（output.home_url 等）。"""
+        s = self._settings
+
+        def _int(var: tk.StringVar, default: int) -> int:
+            try:
+                return int(var.get().strip())
+            except Exception:
+                return default
+
+        def _float(var: tk.StringVar, default: float) -> float:
+            try:
+                return float(var.get().strip())
+            except Exception:
+                return default
+
+        s.excel.path = self._excel_var.get().strip() or "accounts.xlsx"
+        s.excel.token_column = self._token_col_var.get().strip() or "auth_token"
+        s.excel.ct0_column = self._ct0_col_var.get().strip()
+        s.excel.backup = bool(self._backup_var.get())
+
+        s.ixbrowser.host = self._ix_host_var.get().strip() or "127.0.0.1"
+        s.ixbrowser.port = _int(self._ix_port_var, 53200)
+        s.ixbrowser.profile_name_filter = self._ix_filter_var.get().strip()
+        s.ixbrowser.profile_limit = _int(self._ix_limit_var, 1)
+        s.ixbrowser.keep_window_open = bool(self._keep_open_var.get())
+
+        s.twitter.login_timeout = _int(self._tw_timeout_var, 25)
+        s.twitter.max_tokens_per_profile = _int(self._tw_max_var, 20)
+        s.twitter.retry_per_token = _int(self._tw_retry_var, 1)
+        s.twitter.delay_min = _float(self._tw_delay_min_var, 3.0)
+        s.twitter.delay_max = _float(self._tw_delay_max_var, 6.0)
+
+        s.wallet.enabled = bool(self._wallet_enabled_var.get())
+        s.wallet.mode = self._wallet_mode_var.get().strip() or "auto"
+        s.wallet.extension_id = self._wallet_ext_var.get().strip()
+        s.wallet.password_prefix = self._wallet_pfx_var.get().strip() or "Wx"
+        s.wallet.password_length = _int(self._wallet_plen_var, 14)
+        s.wallet.manual_fallback = bool(self._wallet_fallback_var.get())
+
+        return s
+
+    # -------------------------------------------------------------- 按钮
+    def _pick_excel(self) -> None:
+        path = filedialog.askopenfilename(
+            title="选择 token 表",
+            filetypes=[("Excel", "*.xlsx *.xls"), ("所有文件", "*.*")],
+        )
+        if path:
+            self._excel_var.set(path)
+
+    def _test_ix(self) -> None:
+        try:
+            s = self._collect_settings()
+            from modules.browser import BrowserManager
+            bm = BrowserManager(s.ixbrowser)
+            profiles = bm.list_profiles()
+            messagebox.showinfo("ixBrowser 连接成功",
+                                f"已连接 {s.ixbrowser.host}:{s.ixbrowser.port}\n共发现 {len(profiles)} 个窗口")
+        except Exception as exc:
+            messagebox.showerror("连接失败", str(exc))
+
+    def _on_save_cfg(self) -> None:
+        s = self._collect_settings()
+        try:
+            import yaml
+        except ImportError:  # pragma: no cover
+            messagebox.showerror("缺少依赖", "请先执行: pip install PyYAML")
+            return
+        try:
+            data = {
+                "excel": {
+                    "path": s.excel.path, "token_column": s.excel.token_column,
+                    "ct0_column": s.excel.ct0_column, "backup": s.excel.backup,
+                },
+                "ixbrowser": {
+                    "host": s.ixbrowser.host, "port": s.ixbrowser.port,
+                    "profile_name_filter": s.ixbrowser.profile_name_filter,
+                    "profile_limit": s.ixbrowser.profile_limit,
+                    "keep_window_open": s.ixbrowser.keep_window_open,
+                },
+                "twitter": {
+                    "home_url": s.twitter.home_url, "login_timeout": s.twitter.login_timeout,
+                    "max_tokens_per_profile": s.twitter.max_tokens_per_profile,
+                    "retry_per_token": s.twitter.retry_per_token,
+                    "delay_min": s.twitter.delay_min, "delay_max": s.twitter.delay_max,
+                },
+                "wallet": {
+                    "enabled": s.wallet.enabled, "mode": s.wallet.mode,
+                    "extension_id": s.wallet.extension_id,
+                    "password_prefix": s.wallet.password_prefix,
+                    "password_length": s.wallet.password_length,
+                    "step_timeout": s.wallet.step_timeout,
+                    "manual_fallback": s.wallet.manual_fallback,
+                },
+                "output": {"log_dir": s.output.log_dir, "screenshot_dir": s.output.screenshot_dir},
+            }
+            with open(self._config_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+            messagebox.showinfo("已保存", str(self._config_path))
+        except Exception as exc:
+            messagebox.showerror("保存失败", str(exc))
+
+    def _on_load_cfg(self) -> None:
+        path = filedialog.askopenfilename(
+            title="选择配置文件",
+            filetypes=[("YAML", "*.yaml *.yml"), ("所有文件", "*.*")],
+            initialdir=str(self._workdir),
+        )
+        if not path:
+            return
+        try:
+            self._settings = load_settings(path)
+            self._load_settings_to_ui()
+        except Exception as exc:
+            messagebox.showerror("加载失败", str(exc))
+
+    # ----------------------------------------------------------- 运行控制
+    def _on_start(self) -> None:
+        if self._is_running:
+            return
+        s = self._collect_settings()
+
+        # 基础校验
+        if not Path(s.excel.path).exists():
+            messagebox.showerror("参数错误", f"Excel 不存在:\n{s.excel.path}")
+            return
+
+        if not s.wallet.enabled and s.wallet.mode != "skip":
+            # 让 GUI 上 radio 覆盖
+            pass
+
+        self._reset_log()
+        self._reset_stats()
+
+        self._stop_event = threading.Event()
+        self._log_queue = queue.Queue()
+        self._is_running = True
+        self._set_running_state(True)
+
+        try:
+            self._worker = threading.Thread(
+                target=self._run_worker, args=(s,), daemon=True
+            )
+            self._worker.start()
+        except Exception as exc:
+            messagebox.showerror("启动失败", str(exc))
+            self._set_running_state(False)
+
+    def _on_stop(self) -> None:
+        if not self._is_running:
+            return
+        if not messagebox.askyesno("确认", "请求停止？当前窗口处理完即退出。"):
+            return
+        self._stop_event.set()
+        self._append_log("[INFO] 收到停止信号，等当前窗口结束 ...")
+
+    def _run_worker(self, s: Settings) -> None:
+        try:
+            run(s, gui_queue=self._log_queue, stop_event=self._stop_event)
+        except Exception as exc:
+            self._log_queue.put(f"[ERROR] 运行异常: {exc}")
+        finally:
+            self.after(0, self._set_running_state, False)
+
+    def _set_running_state(self, running: bool) -> None:
+        self._is_running = running
+        if running:
+            self._status_dot.config(fg=COLOR_RUNNING); self._status_label.config(text="运行中 ...")
+            self._start_btn.config(state=tk.DISABLED); self._stop_btn.config(state=tk.NORMAL)
+        else:
+            self._status_dot.config(fg=COLOR_IDLE); self._status_label.config(text="空闲")
+            self._start_btn.config(state=tk.NORMAL); self._stop_btn.config(state=tk.DISABLED)
+
+    # ----------------------------------------------------------- 日志刷新
+    def _reset_log(self) -> None:
+        self._log_text.config(state=tk.NORMAL); self._log_text.delete("1.0", tk.END); self._log_text.config(state=tk.DISABLED)
+
+    def _append_log(self, text: str) -> None:
+        self._log_text.config(state=tk.NORMAL)
+        # 简单根据前缀着色
+        tag = "INFO"
+        if "[ERROR]" in text: tag = "ERROR"
+        elif "[WARNING]" in text or "[WARN]" in text: tag = "WARNING"
+        self._log_text.insert(tk.END, text + "\n", tag)
+        self._log_text.see(tk.END)
+        self._log_text.config(state=tk.DISABLED)
+
+    def _drain_log_queue(self) -> None:
+        changed = False
+        while True:
+            try:
+                msg = self._log_queue.get_nowait()
+            except Empty:
+                break
+            self._append_log(msg)
+            changed = True
+
+        if changed:
+            self._refresh_stats()
+        self.after(200, self._drain_log_queue)
+
+    # ----------------------------------------------------------- 统计
+    def _reset_stats(self) -> None:
+        for v in self._stat_vars.values():
+            v.set("0")
+
+    def _refresh_stats(self) -> None:
+        """从日志反推统计：匹配 登录成功 / token 失效 / 账号受限 / 放弃当前窗口 / 窗口失败 等关键字。"""
+        text = self._log_text.get("1.0", tk.END)
+        stats = {k: 0 for k in self._stat_vars}
+        for line in text.splitlines():
+            if "登录成功" in line: stats["ok"] += 1
+            elif "token 失效" in line or "auth_token 未被接受" in line: stats["invalid"] += 1
+            elif "账号受限" in line: stats["restricted"] += 1
+            elif "放弃当前窗口" in line: stats["error"] += 1
+            elif "打开/连接窗口失败" in line: stats["window_error"] += 1
+        for k, v in stats.items():
+            self._stat_vars[k].set(str(v))
+
+    # ------------------------------------------------------------ 关闭
+    def _on_close(self) -> None:
+        if self._is_running:
+            if not messagebox.askyesno("退出", "程序正在运行，确定退出？（将尝试保存并停止）"):
+                return
+            self._stop_event.set()
+            # 等线程收尾
+            if self._worker and self._worker.is_alive():
+                self._worker.join(timeout=5)
+        self.destroy()
+
+
+def main() -> None:
+    App().mainloop()
+
+
+if __name__ == "__main__":
+    main()

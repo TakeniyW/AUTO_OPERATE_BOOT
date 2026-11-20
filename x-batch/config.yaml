@@ -1,0 +1,58 @@
+# ================= Excel =================
+excel:
+  # token 表路径（相对路径按运行目录解析，也可写绝对路径）
+  path: "accounts.xlsx"
+  # 工作表名，留空 = 第一个工作表
+  sheet: ""
+  # token 所在列的表头名；找不到时会自动匹配 auth_token / token
+  token_column: "auth_token"
+  # 可选：如果表里还有 ct0 列，把表头名填这里，否则留空
+  ct0_column: ""
+  # 首次写入前是否备份原文件（同目录生成 accounts.xlsx.bak）
+  backup: true
+
+# ================= ixBrowser =================
+ixbrowser:
+  # ixBrowser 客户端本地 API 地址（客户端设置里可查看）
+  host: "127.0.0.1"
+  port: 53200
+  # 只处理窗口名称包含该关键字的窗口，留空 = 全部窗口
+  profile_name_filter: ""
+  # 最多处理几个窗口，0 = 全部
+  profile_limit: 1
+  # 调试用：处理完不关闭窗口
+  keep_window_open: false
+
+# ================= Twitter =================
+twitter:
+  home_url: "https://x.com/home"
+  # 注入 cookie 后等待登录结果的超时时间（秒）
+  login_timeout: 25
+  # 单个窗口最多消耗多少个失效 token（避免整表被一个窗口耗尽）
+  max_tokens_per_profile: 20
+  # 网络/加载异常时同一 token 的重试次数
+  retry_per_token: 1
+  # 每个动作之间的随机延迟（秒），降低风控概率
+  delay_min: 3.0
+  delay_max: 6.0
+
+# ================= 钱包 =================
+wallet:
+  enabled: true
+  # auto  = 本地生成助记词并自动导入 MetaMask
+  # manual= 只提示，人工在窗口里创建后回填
+  # skip  = 本次不处理钱包
+  mode: "auto"
+  # MetaMask 扩展 ID，留空自动探测
+  extension_id: ""
+  password_prefix: "Wx"
+  password_length: 14
+  # 每一步 UI 操作的等待时间（秒）
+  step_timeout: 20
+  # 自动导入失败时，暂停等待人工在窗口内完成
+  manual_fallback: true
+
+# ================= 输出 =================
+output:
+  log_dir: "logs"
+  screenshot_dir: "screenshots"

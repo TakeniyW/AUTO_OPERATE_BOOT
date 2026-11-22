@@ -16,7 +16,7 @@ from pathlib import Path
 from queue import Empty
 from tkinter import filedialog, messagebox, ttk
 
-APP_TITLE = "x-batch · ixBrowser 批量推特登录 + 钱包初始化"
+APP_TITLE = "x-batch v1.2 · ixBrowser 批量推特登录 + 钱包初始化"
 
 _WORKDIR = Path(__file__).parent.resolve()
 _STARTUP_LOG = _WORKDIR / "startup_error.log"

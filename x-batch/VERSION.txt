@@ -1,0 +1,6 @@
+x-batch 1.2
+build: 2026-11-22
+changes:
+  - install_deps.bat / run_gui.bat are ASCII + CRLF (fix cmd parse error)
+  - ixbrowser-local-api requirement relaxed to >=1.2.2
+  - browser.py compatible with SDK 1.2.x (no timeout kwarg)

@@ -201,3 +201,164 @@ def login_with_token(
     if not _has_auth_cookie(context):
         return LoginResult(INVALID, detail="auth_token 已被清除")
     return LoginResult(ERROR, detail="判定超时，未出现登录标识")
+
+
+# ------------------------------------------------------------ 账号密码登录
+USERNAME_INPUTS = (
+    'input[autocomplete="username"]',
+    'input[name="text"]',
+)
+PASSWORD_INPUTS = (
+    'input[name="password"]',
+    'input[autocomplete="current-password"]',
+)
+CODE_INPUTS = ('input[data-testid="ocfEnterTextTextInput"]',)
+
+PASSWORD_ERROR_TEXTS = (
+    "wrong password",
+    "could not authenticate",
+    "密码不正确",
+    "密码错误",
+    "登录名或密码错误",
+)
+ACCOUNT_ERROR_TEXTS = (
+    "couldn't find your account",
+    "找不到你的账号",
+    "账号不存在",
+)
+RISK_TEXTS = (
+    "unusual activity",
+    "verify your identity",
+    "temporarily limited",
+    "异常活动",
+    "确认你的身份",
+    "暂时限制",
+)
+
+
+def _visible_input(page: Page, selectors, timeout: float = 0.0):
+    """返回第一个可见的输入框，找不到返回 None。"""
+    deadline = time.time() + max(0.0, timeout)
+    while True:
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if locator.count() > 0 and locator.is_visible():
+                    return locator
+            except Exception:
+                continue
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.5)
+
+
+def _body_lower(page: Page) -> str:
+    try:
+        return (page.inner_text("body", timeout=1500) or "").lower()
+    except Exception:
+        return ""
+
+
+def login_with_password(
+    context: BrowserContext,
+    username: str,
+    password: str,
+    code_getter,
+    login_url: str = "https://x.com/i/flow/login",
+    timeout: int = 40,
+) -> LoginResult:
+    """账号密码登录，遇到 2FA 时调用 code_getter() 取验证码。"""
+    username = (username or "").strip().lstrip("@")
+    if not username or not password:
+        return LoginResult(INVALID, detail="账号或密码为空")
+
+    _clear_auth_cookies(context)
+    page = _get_page(context)
+    try:
+        page.goto(login_url, wait_until="domcontentloaded", timeout=timeout * 1000)
+    except Exception as exc:
+        return LoginResult(ERROR, detail=f"打开登录页失败: {exc}")
+
+    deadline = time.time() + timeout
+
+    # ---------------- 第一步：填账号
+    username_input = _visible_input(page, USERNAME_INPUTS, timeout=min(15, timeout))
+    if username_input is None:
+        return LoginResult(ERROR, detail="登录页未出现账号输入框")
+    try:
+        username_input.click()
+        username_input.fill(username)
+        username_input.press("Enter")
+    except Exception as exc:
+        return LoginResult(ERROR, detail=f"填写账号失败: {exc}")
+
+    # ---------------- 第二步：等密码框出现
+    password_input = None
+    while time.time() < deadline:
+        state = _probe(page)
+        if state == OK:
+            return LoginResult(OK, username=_read_username(page), detail="已登录")
+
+        password_input = _visible_input(page, PASSWORD_INPUTS)
+        if password_input is not None:
+            break
+
+        body = _body_lower(page)
+        if any(text in body for text in ACCOUNT_ERROR_TEXTS):
+            return LoginResult(INVALID, detail="账号不存在")
+        if any(text in body for text in RISK_TEXTS):
+            return LoginResult(RESTRICTED, detail="触发风控验证，需人工处理")
+        if _visible_input(page, CODE_INPUTS) is not None:
+            return LoginResult(RESTRICTED, detail="要求补充手机号/邮箱验证，需人工")
+        if any(part in (page.url or "") for part in RESTRICTED_URLS):
+            return LoginResult(RESTRICTED, detail="账号受限/需要验证")
+        time.sleep(1.0)
+
+    if password_input is None:
+        return LoginResult(ERROR, detail="等待密码输入框超时")
+
+    # ---------------- 第三步：填密码
+    try:
+        password_input.fill(password)
+        password_input.press("Enter")
+    except Exception as exc:
+        return LoginResult(ERROR, detail=f"填写密码失败: {exc}")
+
+    # ---------------- 第四步：等结果 / 处理 2FA
+    code_tries = 0
+    while time.time() < deadline:
+        state = _probe(page)
+        if state == OK:
+            return LoginResult(OK, username=_read_username(page), detail="已登录")
+        if state == RESTRICTED:
+            return LoginResult(RESTRICTED, detail="账号受限/需要验证")
+
+        body = _body_lower(page)
+        if any(text in body for text in PASSWORD_ERROR_TEXTS):
+            return LoginResult(INVALID, detail="密码错误")
+        if any(text in body for text in RISK_TEXTS):
+            return LoginResult(RESTRICTED, detail="触发风控验证，需人工处理")
+
+        code_input = _visible_input(page, CODE_INPUTS)
+        if code_input is not None:
+            if code_tries >= 2:
+                return LoginResult(ERROR, detail="验证码多次未通过")
+            code_tries += 1
+            try:
+                code = str(code_getter()).strip()
+            except Exception as exc:
+                return LoginResult(ERROR, detail=f"获取 2FA 验证码失败: {exc}")
+            log.info("  输入 2FA 验证码: %s", code)
+            try:
+                code_input.fill(code)
+                code_input.press("Enter")
+            except Exception as exc:
+                return LoginResult(ERROR, detail=f"填写 2FA 验证码失败: {exc}")
+            time.sleep(3.0)
+            continue
+
+        time.sleep(1.0)
+
+    if _probe(page) == OK:
+        return LoginResult(OK, username=_read_username(page), detail="已登录")
+    return LoginResult(ERROR, detail="账号密码登录判定超时")

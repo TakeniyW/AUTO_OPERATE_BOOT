@@ -26,9 +26,14 @@ class BrowserManager:
             ) from exc
 
         self._cfg = cfg
-        self._client = IXBrowserClient(
-            target=cfg.host, port=cfg.port, timeout=(3, 30)
-        )
+        try:
+            # 1.3+ 的 SDK 支持 timeout 参数
+            self._client = IXBrowserClient(
+                target=cfg.host, port=cfg.port, timeout=(3, 30)
+            )
+        except TypeError:
+            # 1.2.x 及更早版本没有 timeout 参数，只能传地址和端口
+            self._client = IXBrowserClient(target=cfg.host, port=cfg.port)
         self._pw: Optional[Playwright] = None
 
     # ------------------------------------------------------------------ 窗口

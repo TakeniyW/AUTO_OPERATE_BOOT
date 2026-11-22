@@ -6,22 +6,72 @@
 from __future__ import annotations
 
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
+import traceback
+from datetime import datetime
 from pathlib import Path
 from queue import Empty
 from tkinter import filedialog, messagebox, ttk
 
-try:
-    import yaml
-except ImportError:  # pragma: no cover
-    yaml = None  # 启动后再提示
-
-from main import run
-from modules.config import Settings, load_settings
-
 APP_TITLE = "x-batch · ixBrowser 批量推特登录 + 钱包初始化"
+
+_WORKDIR = Path(__file__).parent.resolve()
+_STARTUP_LOG = _WORKDIR / "startup_error.log"
+
+# 真正的对象在 main() 里通过 _load_core() 注入：
+# 这样缺依赖时能弹窗说明原因，而不是双击后窗口一闪而过。
+run = None
+Settings = None
+load_settings = None
+
+
+def _report_startup_error(title: str, detail: str) -> None:
+    """双击启动时没有控制台，把 traceback 写入文件并弹窗，避免闪退后无从排查。"""
+    try:
+        with _STARTUP_LOG.open("a", encoding="utf-8") as fp:
+            fp.write(f"\n===== {datetime.now():%Y-%m-%d %H:%M:%S} =====\n{detail}\n")
+    except Exception:
+        pass
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            title,
+            f"{detail[-1500:]}\n\n详细信息已写入:\n{_STARTUP_LOG}",
+        )
+        root.destroy()
+    except Exception:
+        print(detail, file=sys.stderr)
+
+
+def _check_dependencies() -> None:
+    """只检查启动必需的硬依赖；playwright 等在实际运行时按需报错。"""
+    import importlib.util
+
+    missing = [
+        pkg
+        for mod, pkg in (("yaml", "PyYAML"), ("openpyxl", "openpyxl"))
+        if importlib.util.find_spec(mod) is None
+    ]
+    if missing:
+        raise RuntimeError(
+            "缺少运行依赖: " + ", ".join(missing) + "\n\n"
+            "请双击本目录的 install_deps.bat（安装依赖），或在命令行执行:\n"
+            "  pip install -r requirements.txt\n\n"
+            "国内网络慢可加镜像:\n"
+            "  pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple"
+        )
+
+
+def _load_core():
+    _check_dependencies()
+    from main import run as _run
+    from modules.config import Settings as _Settings, load_settings as _load
+
+    return _run, _Settings, _load
 
 # 颜色
 COLOR_RUNNING = "#c0392b"
@@ -65,8 +115,8 @@ class App(tk.Tk):
         self._start_btn.pack(side=tk.RIGHT)
         self._stop_btn = ttk.Button(top, text="■ 停止", width=10, command=self._on_stop, state=tk.DISABLED)
         self._stop_btn.pack(side=tk.RIGHT, padx=(0, 8))
-        ttk.Button(top, text="💾 保存配置", command=self._on_save_cfg).pack(side=tk.RIGHT, padx=(0, 8))
-        ttk.Button(top, text="📂 加载配置", command=self._on_load_cfg).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(top, text="保存配置", command=self._on_save_cfg).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(top, text="加载配置", command=self._on_load_cfg).pack(side=tk.RIGHT, padx=(0, 8))
 
         # 主体：参数 Notebook (左 50%) + 日志/统计 (右 50%)
         body = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
@@ -101,7 +151,7 @@ class App(tk.Tk):
             ("invalid", "❌ token 失效"),
             ("restricted", "⚠️ 账号受限"),
             ("error", "❗ 异常放弃"),
-            ("window_error", "🔧 窗口失败"),
+            ("window_error", "窗口失败"),
         ]:
             row = ttk.Frame(stats_frame)
             row.pack(fill=tk.X, pady=1)
@@ -503,7 +553,16 @@ class App(tk.Tk):
 
 
 def main() -> None:
-    App().mainloop()
+    global run, Settings, load_settings
+    try:
+        run, Settings, load_settings = _load_core()
+    except Exception:
+        _report_startup_error("x-batch 启动失败", traceback.format_exc())
+        return
+    try:
+        App().mainloop()
+    except Exception:
+        _report_startup_error("x-batch 运行异常", traceback.format_exc())
 
 
 if __name__ == "__main__":

@@ -22,8 +22,19 @@ STATUS_RESTRICTED = "受限/需人工"
 STATUS_ERROR = "异常"
 STATUS_MANUAL = "待人工"
 STATUS_UNUSED = "未使用"
+STATUS_FAILED = "全部失败"
+
+TOKEN_UNKNOWN = "未尝试"
+TOKEN_OK = "成功"
+TOKEN_FAILED = "失效"
+PASSWORD_UNKNOWN = "未尝试"
+PASSWORD_OK = "成功"
+PASSWORD_FAILED = "失败"
 
 COL_STATUS = "状态"
+COL_TOKEN_LOGIN = "token登录"
+COL_PASSWORD_LOGIN = "账号登录"
+COL_FINAL = "最终结果"
 COL_PROFILE_ID = "窗口ID"
 COL_PROFILE_NAME = "窗口名称"
 COL_USERNAME = "X用户名"
@@ -35,6 +46,9 @@ COL_NOTE = "备注"
 
 EXTRA_COLUMNS = [
     COL_STATUS,
+    COL_TOKEN_LOGIN,
+    COL_PASSWORD_LOGIN,
+    COL_FINAL,
     COL_PROFILE_ID,
     COL_PROFILE_NAME,
     COL_USERNAME,
@@ -50,6 +64,10 @@ EXTRA_COLUMNS = [
 class AccountRow:
     sheet_row: int
     token: str
+    idx: str = ""
+    account: str = ""
+    password: str = ""
+    twofa: str = ""
     status: str = ""
     values: Dict[str, str] = field(default_factory=dict)
 
@@ -100,6 +118,10 @@ class ExcelStore:
 
         self.token_col = self._resolve_token_column(cfg.token_column)
         self.ct0_col = self._optional_column(cfg.ct0_column)
+        self.idx_col = self._optional_column("序号")
+        self.account_col = self._optional_column(cfg.username_column)
+        self.password_col = self._optional_column(cfg.password_column)
+        self.twofa_col = self._optional_column(cfg.twofa_column)
 
         for name in EXTRA_COLUMNS:
             self._column(name)
@@ -143,18 +165,33 @@ class ExcelStore:
         return index
 
     # --------------------------------------------------------------- 读表
+    def _cell_text(self, row: int, col: Optional[int]) -> str:
+        if not col:
+            return ""
+        value = self.ws.cell(row=row, column=col).value
+        return str(value).strip() if value is not None else ""
+
     def _load_rows(self) -> List[AccountRow]:
         rows: List[AccountRow] = []
         for sheet_row in range(self.header_row + 1, self.ws.max_row + 1):
             raw = self.ws.cell(row=sheet_row, column=self.token_col).value
             token = _parse_token(raw)
-            if not token:
+            account = self._cell_text(sheet_row, self.account_col)
+            # token 和账号都为空才跳过（允许 token 失效但账号密码可用的行）
+            if not token and not account:
                 continue
-            status = str(
-                self.ws.cell(row=sheet_row, column=self._column(COL_STATUS)).value
-                or ""
-            ).strip()
-            rows.append(AccountRow(sheet_row=sheet_row, token=token, status=status))
+            status = self._cell_text(sheet_row, self._column(COL_STATUS))
+            rows.append(
+                AccountRow(
+                    sheet_row=sheet_row,
+                    token=token,
+                    idx=self._cell_text(sheet_row, self.idx_col),
+                    account=account,
+                    password=self._cell_text(sheet_row, self.password_col),
+                    twofa=self._cell_text(sheet_row, self.twofa_col),
+                    status=status,
+                )
+            )
         return rows
 
     def pending_rows(self) -> List[AccountRow]:

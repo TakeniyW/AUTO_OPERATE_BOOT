@@ -25,18 +25,27 @@ from typing import Dict, List, Optional
 from modules.browser import BrowserManager, IxBrowserError
 from modules.config import Settings, load_settings
 from modules.excel_store import (
+    COL_FINAL,
+    COL_PASSWORD_LOGIN,
     COL_PROFILE_ID,
     COL_PROFILE_NAME,
     COL_STATUS,
+    COL_TOKEN_LOGIN,
     COL_USERNAME,
+    PASSWORD_FAILED,
+    PASSWORD_UNKNOWN,
     STATUS_ERROR,
-    STATUS_INVALID,
+    STATUS_FAILED,
     STATUS_LOGINED,
     STATUS_RESTRICTED,
+    TOKEN_FAILED,
+    TOKEN_OK,
+    TOKEN_UNKNOWN,
     AccountRow,
     ExcelStore,
 )
-from modules import tw_login, wallet
+from modules.state_db import StateDB
+from modules import tw_login, twofa, wallet
 
 log = logging.getLogger("x-batch")
 
@@ -144,12 +153,45 @@ def handle_wallet(
 
 
 # ---------------------------------------------------------------- 单窗口流程
+def _sleep(seconds: float, stop_event: Optional[threading.Event]) -> bool:
+    """可中断的等待，返回 False 表示期间收到了停止信号。"""
+    end = time.time() + seconds
+    while time.time() < end:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        time.sleep(0.2)
+    return True
+
+
+def _token_text(result) -> str:
+    if result is None:
+        return TOKEN_UNKNOWN
+    return {
+        tw_login.OK: TOKEN_OK,
+        tw_login.INVALID: TOKEN_FAILED,
+        tw_login.RESTRICTED: "受限",
+        tw_login.ERROR: "异常",
+    }.get(result.status, "异常")
+
+
+def _password_text(result) -> str:
+    if result is None:
+        return PASSWORD_UNKNOWN
+    return {
+        tw_login.OK: "成功",
+        tw_login.INVALID: PASSWORD_FAILED,
+        tw_login.RESTRICTED: "受限",
+        tw_login.ERROR: "异常",
+    }.get(result.status, "异常")
+
+
 def process_profile(
     bm: BrowserManager,
     profile: Dict[str, str],
     pending: List[AccountRow],
     settings: Settings,
     store: ExcelStore,
+    db: StateDB,
     stats: Dict[str, int],
     stop_event: Optional[threading.Event] = None,
 ) -> None:
@@ -170,7 +212,6 @@ def process_profile(
         return
 
     tried = 0
-    error_tries = 0
     try:
         while pending and tried < settings.twitter.max_tokens_per_profile:
             if stop_event is not None and stop_event.is_set():
@@ -178,106 +219,151 @@ def process_profile(
                 return
             row = pending[0]
             tried += 1
-            log.info("  尝试 token %s（第 %d 个，Excel 行 %d）", mask(row.token), tried, row.sheet_row)
+            record_label = row.idx or str(row.sheet_row)
+            log.info(
+                "  处理记录 %s（Excel 行 %d，账号 %s）",
+                record_label,
+                row.sheet_row,
+                row.account or "(无)",
+            )
 
-            try:
-                result = tw_login.login_with_token(
-                    context,
-                    row.token,
-                    home_url=settings.twitter.home_url,
-                    timeout=settings.twitter.login_timeout,
-                    ct0=store.ct0_of(row),
-                )
-            except Exception as exc:
-                result = tw_login.LoginResult(tw_login.ERROR, detail=str(exc))
+            # ============ 第一步：token 登录 ============
+            token_result = None
+            if row.token:
+                log.info("    尝试 token %s", mask(row.token))
+                attempt = 0
+                while True:
+                    try:
+                        token_result = tw_login.login_with_token(
+                            context,
+                            row.token,
+                            home_url=settings.twitter.home_url,
+                            timeout=settings.twitter.login_timeout,
+                            ct0=store.ct0_of(row),
+                        )
+                    except Exception as exc:
+                        token_result = tw_login.LoginResult(tw_login.ERROR, detail=str(exc))
 
-            if result.status == tw_login.OK:
-                store.update(
-                    row,
-                    **{
-                        COL_STATUS: STATUS_LOGINED,
-                        COL_PROFILE_ID: profile_id,
-                        COL_PROFILE_NAME: profile_name,
-                        COL_USERNAME: result.username,
-                        "备注": "",
-                    },
-                )
-                pending.pop(0)
-                store.save()
-                stats["ok"] += 1
-                log.info("  登录成功: %s", result.username or "(未取到用户名)")
-                try:
-                    handle_wallet(browser, context, settings, store, row, label)
-                except Exception as exc:
-                    store.update(row, 备注=f"钱包处理异常: {exc}")
-                    store.save()
-                    log.exception("  钱包处理异常")
-                return
-
-            if result.status == tw_login.INVALID:
-                store.update(
-                    row,
-                    **{
-                        COL_STATUS: STATUS_INVALID,
-                        COL_PROFILE_ID: profile_id,
-                        COL_PROFILE_NAME: profile_name,
-                        "备注": result.detail,
-                    },
-                )
-                pending.pop(0)
-                store.save()
-                stats["invalid"] += 1
-                error_tries = 0
-                log.warning("  token 失效: %s", result.detail)
-                human_delay(settings, stop_event)
-                continue
-
-            if result.status == tw_login.RESTRICTED:
-                store.update(
-                    row,
-                    **{
-                        COL_STATUS: STATUS_RESTRICTED,
-                        COL_PROFILE_ID: profile_id,
-                        COL_PROFILE_NAME: profile_name,
-                        "备注": result.detail,
-                    },
-                )
-                pending.pop(0)
-                store.save()
-                stats["restricted"] += 1
-                error_tries = 0
-                log.warning("  账号受限，换下一个 token: %s", result.detail)
-                human_delay(settings, stop_event)
-                continue
-
-            # 网络/加载异常：同一 token 先重试，仍失败则放弃该窗口
-            error_tries += 1
-            if error_tries <= settings.twitter.retry_per_token:
-                log.warning("  加载异常，5 秒后重试: %s", result.detail)
-                # 分段 sleep 支持停止
-                if stop_event is not None:
-                    for _ in range(10):
-                        if stop_event.is_set():
-                            break
-                        time.sleep(0.5)
-                else:
-                    time.sleep(5)
-                continue
+                    if token_result.status != tw_login.ERROR:
+                        break
+                    if attempt >= settings.twitter.retry_per_token:
+                        break
+                    attempt += 1
+                    log.warning("    token 加载异常，重试中: %s", token_result.detail)
+                    if not _sleep(3.0, stop_event):
+                        return
+            token_status = _token_text(token_result)
 
             store.update(
                 row,
                 **{
-                    COL_STATUS: STATUS_ERROR,
+                    COL_TOKEN_LOGIN: token_status,
                     COL_PROFILE_ID: profile_id,
                     COL_PROFILE_NAME: profile_name,
-                    "备注": result.detail,
                 },
             )
+            db.upsert(
+                row.sheet_row,
+                idx=row.idx,
+                account=row.account,
+                token_status=token_status,
+                profile=label,
+                note=token_result.detail if token_result else "",
+            )
+
+            if token_result is not None and token_result.status == tw_login.OK:
+                log.info("    token 登录成功: %s", token_result.username or "(未取到用户名)")
+                _finish_success(store, db, row, profile_id, profile_name, token_status,
+                                PASSWORD_UNKNOWN, token_result.username, "token")
+                pending.pop(0)
+                store.save()
+                stats["ok"] += 1
+                stats["token_ok"] += 1
+                _after_login(browser, context, settings, store, row, label)
+                return
+
+            if token_status != TOKEN_UNKNOWN:
+                log.warning("    token 登录失败: %s", token_result.detail)
+
+            # ============ 第二步：账号密码兜底 ============
+            password_result = None
+            can_password = (
+                settings.twitter.password_login
+                and bool(row.account)
+                and bool(row.password)
+                and token_status != "受限"
+            )
+            if can_password:
+                def _code_getter() -> str:
+                    code, source = twofa.code_from_link(row.twofa)
+                    log.info("    2FA 验证码来源: %s", source)
+                    return code
+
+                log.info("    改用账号密码登录（账号 %s）...", row.account)
+                try:
+                    password_result = tw_login.login_with_password(
+                        context,
+                        row.account,
+                        row.password,
+                        _code_getter,
+                        login_url=settings.twitter.login_url,
+                        timeout=settings.twitter.password_timeout,
+                    )
+                except Exception as exc:
+                    password_result = tw_login.LoginResult(tw_login.ERROR, detail=str(exc))
+
+                password_status = _password_text(password_result)
+                store.update(row, **{COL_PASSWORD_LOGIN: password_status})
+                db.upsert(row.sheet_row, password_status=password_status,
+                          note=password_result.detail)
+
+                if password_result.status == tw_login.OK:
+                    log.info("    账号密码登录成功: %s", password_result.username or row.account)
+                    _finish_success(store, db, row, profile_id, profile_name, token_status,
+                                    password_status, password_result.username, "password")
+                    pending.pop(0)
+                    store.save()
+                    stats["ok"] += 1
+                    stats["pwd_ok"] += 1
+                    _after_login(browser, context, settings, store, row, label)
+                    return
+
+                log.warning("    账号密码登录失败: %s", password_result.detail)
+            else:
+                password_status = PASSWORD_UNKNOWN
+                log.info("    跳过账号密码登录（未启用或缺少账号/密码）")
+                store.update(row, **{COL_PASSWORD_LOGIN: PASSWORD_UNKNOWN})
+
+            # ============ 第三步：两种方式都失败 ============
+            status = _final_status(token_result, password_result)
+            token_detail = token_result.detail if token_result else ""
+            pwd_detail = password_result.detail if password_result else ""
+            note = " | ".join(x for x in (token_detail, pwd_detail) if x)
+            store.update(
+                row,
+                **{
+                    COL_STATUS: status,
+                    COL_FINAL: status,
+                    COL_PROFILE_ID: profile_id,
+                    COL_PROFILE_NAME: profile_name,
+                    "备注": note,
+                },
+            )
+            db.upsert(row.sheet_row, final_status=status, note=note)
             pending.pop(0)
             store.save()
-            stats["error"] += 1
-            log.error("  放弃当前窗口: %s", result.detail)
-            return
+
+            if status == STATUS_RESTRICTED:
+                stats["restricted"] += 1
+                log.warning("  token / 密码均不可用（受限），换下一条: %s", note)
+            elif status == STATUS_ERROR:
+                stats["error"] += 1
+                log.error("  网络/页面异常，放弃当前窗口: %s", note)
+                return
+            else:
+                stats["fail"] += 1
+                log.warning("  全部登录方式失败，换下一条: %s", note)
+            human_delay(settings, stop_event)
     finally:
         bm.stop_playwright()
         if not settings.ixbrowser.keep_window_open:
@@ -286,6 +372,60 @@ def process_profile(
                 log.info("  窗口已关闭")
             except Exception:
                 pass
+
+
+def _final_status(token_result, password_result) -> str:
+    statuses = [r.status for r in (token_result, password_result) if r is not None]
+    if tw_login.RESTRICTED in statuses:
+        return STATUS_RESTRICTED
+    if tw_login.ERROR in statuses:
+        return STATUS_ERROR
+    return STATUS_FAILED
+
+
+def _finish_success(
+    store: ExcelStore,
+    db: StateDB,
+    row: AccountRow,
+    profile_id: str,
+    profile_name: str,
+    token_status: str,
+    password_status: str,
+    username: str,
+    method: str,
+) -> None:
+    store.update(
+        row,
+        **{
+            COL_STATUS: STATUS_LOGINED,
+            COL_FINAL: STATUS_LOGINED,
+            COL_TOKEN_LOGIN: token_status,
+            COL_PASSWORD_LOGIN: password_status,
+            COL_PROFILE_ID: profile_id,
+            COL_PROFILE_NAME: profile_name,
+            COL_USERNAME: username,
+            "备注": f"登录方式: {method}",
+        },
+    )
+    db.upsert(
+        row.sheet_row,
+        token_status=token_status,
+        password_status=password_status,
+        final_status=STATUS_LOGINED,
+        username=username,
+        profile=profile_name or profile_id,
+        note=f"登录方式: {method}",
+    )
+
+
+def _after_login(browser, context, settings: Settings, store: ExcelStore,
+                 row: AccountRow, label: str) -> None:
+    try:
+        handle_wallet(browser, context, settings, store, row, label)
+    except Exception as exc:
+        store.update(row, 备注=f"钱包处理异常: {exc}")
+        store.save()
+        log.exception("  钱包处理异常")
 
 
 # ---------------------------------------------------------------- 总流程
@@ -303,10 +443,16 @@ def run(
         log.error("读取 Excel 失败: %s", exc)
         return 1
 
+    try:
+        db = StateDB(settings.output.state_db)
+    except Exception as exc:
+        log.error("初始化本地状态库失败: %s", exc)
+        return 1
+
     pending = store.pending_rows()
-    log.info("待处理 token: %d 个（总行数 %d）", len(pending), len(store.rows))
+    log.info("待处理记录: %d 个（总行数 %d）", len(pending), len(store.rows))
     if not pending:
-        log.info("没有待处理的 token，退出")
+        log.info("没有待处理的记录，退出")
         return 0
 
     try:
@@ -327,7 +473,15 @@ def run(
         log.error("没有可用窗口，请检查 ixBrowser 窗口列表或过滤条件")
         return 1
 
-    stats = {"ok": 0, "invalid": 0, "restricted": 0, "error": 0, "window_error": 0}
+    stats = {
+        "ok": 0,
+        "token_ok": 0,
+        "pwd_ok": 0,
+        "fail": 0,
+        "restricted": 0,
+        "error": 0,
+        "window_error": 0,
+    }
     started = time.time()
     try:
         for profile in profiles:
@@ -336,7 +490,7 @@ def run(
                 break
             if not pending:
                 break
-            process_profile(bm, profile, pending, settings, store, stats, stop_event)
+            process_profile(bm, profile, pending, settings, store, db, stats, stop_event)
     except KeyboardInterrupt:
         log.warning("收到中断，正在保存 ...")
     finally:
@@ -345,18 +499,21 @@ def run(
     elapsed = int(time.time() - started)
     log.info("=" * 60)
     log.info(
-        "完成: 成功 %d / 失效 %d / 受限 %d / 异常 %d / 窗口失败 %d，用时 %ds",
+        "完成: 成功 %d（token %d / 密码 %d）/ 全部失败 %d / 受限 %d / 异常 %d / 窗口失败 %d，用时 %ds",
         stats["ok"],
-        stats["invalid"],
+        stats["token_ok"],
+        stats["pwd_ok"],
+        stats["fail"],
         stats["restricted"],
         stats["error"],
         stats["window_error"],
         elapsed,
     )
     log.info("表格统计: %s", store.summary())
+    log.info("本地记录库: %s", db.path.resolve())
     log.info("结果文件: %s", store.path.resolve())
     log.info("剩余未处理 token: %d 个", len(pending))
-    return 0 if stats["ok"] + stats["invalid"] + stats["restricted"] > 0 else 1
+    return 0 if stats["ok"] + stats["fail"] + stats["restricted"] > 0 else 1
 
 
 # ------------------------------------------------------------------ CLI

@@ -8,6 +8,11 @@ excel:
   token_column: "auth_token"
   # 可选：如果表里还有 ct0 列，把表头名填这里，否则留空
   ct0_column: ""
+  # 账号密码登录要用的列（token 失效时兜底）
+  username_column: "账号"
+  password_column: "密码"
+  # 2FA 链接列，内容形如 https://2fa.xdgongju.top/?key=XXXX
+  twofa_column: "2FA"
   # 首次写入前是否备份原文件（同目录生成 accounts.xlsx.bak）
   backup: true
 
@@ -26,8 +31,13 @@ ixbrowser:
 # ================= Twitter =================
 twitter:
   home_url: "https://x.com/home"
+  login_url: "https://x.com/i/flow/login"
   # 注入 cookie 后等待登录结果的超时时间（秒）
   login_timeout: 25
+  # token 失败后是否改用账号密码登录（会自动获取 2FA 验证码）
+  password_login: true
+  # 账号密码登录的总超时时间（秒）
+  password_timeout: 40
   # 单个窗口最多消耗多少个失效 token（避免整表被一个窗口耗尽）
   max_tokens_per_profile: 20
   # 网络/加载异常时同一 token 的重试次数
@@ -56,3 +66,5 @@ wallet:
 output:
   log_dir: "logs"
   screenshot_dir: "screenshots"
+  # 本地记录库，GUI 的“记录查询”页签读这里
+  state_db: "data/state.db"

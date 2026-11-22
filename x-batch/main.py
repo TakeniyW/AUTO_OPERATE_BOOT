@@ -443,6 +443,12 @@ def run(
         log.error("读取 Excel 失败: %s", exc)
         return 1
 
+    if store.is_write_locked():
+        log.warning(
+            "原表正在被 Excel/WPS 打开，状态无法写回原表（会自动另存为 _results.xlsx）。"
+            "建议先关闭表格再运行。"
+        )
+
     try:
         db = StateDB(settings.output.state_db)
     except Exception as exc:

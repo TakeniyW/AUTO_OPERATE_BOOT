@@ -1,6 +1,8 @@
-x-batch 1.3
+x-batch 1.3.1
 build: 2026-11-22
 changes:
+  - 修复窗口 ID 未转数字导致 code=1000 profile_id must be a Number
+  - 原表被 Excel/WPS 占用时提前提示，并说明结果会另存
   - token 失效后自动改用账号密码登录，2FA 验证码从链接本地计算
   - 本地 SQLite 记录每条数据的 token / 账号密码登录结果
   - GUI 新增“记录查询”页签，可按关键字和最终结果筛选

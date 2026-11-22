@@ -70,10 +70,17 @@ class BrowserManager:
             result.append({"id": str(pid), "name": str(name)})
         return result
 
+    @staticmethod
+    def _pid(profile_id):
+        """ixBrowser 的部分接口只接受数字型 id，这里统一做一次转换。"""
+        text = str(profile_id).strip()
+        return int(text) if text.isdigit() else profile_id
+
     def open(self, profile_id: str) -> str:
         """打开窗口，返回 http://ip:port 形式的 CDP 地址。"""
+        pid = self._pid(profile_id)
         data = self._client.open_profile(
-            profile_id, cookies_backup=False, load_profile_info_page=False
+            pid, cookies_backup=False, load_profile_info_page=False
         )
         if data is None:
             raise IxBrowserError(
@@ -89,7 +96,7 @@ class BrowserManager:
 
     def close(self, profile_id: str) -> None:
         try:
-            result = self._client.close_profile(profile_id)
+            result = self._client.close_profile(self._pid(profile_id))
             if result is None:
                 log.warning(
                     "关闭窗口 %s 失败: %s", profile_id, self._client.message

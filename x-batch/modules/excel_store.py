@@ -218,13 +218,26 @@ class ExcelStore:
         value = self.ws.cell(row=row.sheet_row, column=self.ct0_col).value
         return str(value).strip() if value else ""
 
+    def is_write_locked(self) -> bool:
+        """检测原表是否被 Excel/WPS 占用（占用时无法写回）。"""
+        try:
+            with open(self.path, "ab"):
+                return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+
     def save(self) -> None:
         try:
             self.wb.save(self.path)
         except PermissionError:
             alt = self.path.with_name(f"{self.path.stem}_results{self.path.suffix}")
             self.wb.save(alt)
-            log.warning("原表被占用，结果已保存到: %s", alt.resolve())
+            log.warning(
+                "原表被 Excel/WPS 占用，本次结果写入: %s（关闭表格后重跑即可写回原表）",
+                alt.resolve(),
+            )
             self.path = alt
 
     def summary(self) -> Dict[str, int]:

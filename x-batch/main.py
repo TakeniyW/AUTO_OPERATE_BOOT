@@ -175,6 +175,7 @@ def process_profile(
     stats: Dict[str, int],
     stop_event: Optional[threading.Event] = None,
     base_dir: str = ".",
+    manual_callback: Optional[Callable[[str], tuple]] = None,
 ) -> bool:
     """处理一个窗口，返回 True 表示窗口打开/连接失败（可被重试）。"""
     profile_id = profile["id"]
@@ -201,6 +202,26 @@ def process_profile(
     try:
         if settings.randomize.warm_before_login:
             _pre_login_browse(context, settings, stop_event)
+
+        # 窗口已登录 X：直接跳过，不注入新 token、不覆盖现有登录态
+        try:
+            sess = tw_login.check_session(
+                context,
+                home_url=settings.twitter.home_url,
+                timeout=min(12, settings.twitter.login_timeout),
+            )
+            if sess.status == tw_login.OK:
+                log.info(
+                    "  窗口已有登录态（%s），跳过本窗口，不重复登录",
+                    sess.username or "未知账号",
+                )
+                stats["skip_logged_in"] = stats.get("skip_logged_in", 0) + 1
+                return False
+            if sess.status == tw_login.RESTRICTED:
+                log.warning("  窗口已有登录态但受限：%s", sess.detail)
+        except Exception as exc:
+            log.warning("  检测窗口登录态失败，按未登录继续: %s", exc)
+
         while pending and tried < settings.twitter.max_tokens_per_profile:
             if stop_event is not None and stop_event.is_set():
                 log.warning("  收到停止信号，结束当前窗口")
@@ -511,6 +532,7 @@ def run(
         "restricted": 0,
         "error": 0,
         "window_error": 0,
+        "skip_logged_in": 0,
     }
     total = len(pending)
 
@@ -545,7 +567,7 @@ def run(
                         break
 
             if process_profile(bm, profile, pending, settings, store, db, stats,
-                               stop_event, base_dir):
+                               stop_event, base_dir, manual_callback):
                 failed_profiles.append(profile)
             batch_done += 1
             _emit_progress()
@@ -580,7 +602,7 @@ def run(
             if not pending or (stop_event is not None and stop_event.is_set()):
                 break
             if process_profile(bm, profile, pending, settings, store, db, stats,
-                               stop_event, base_dir):
+                               stop_event, base_dir, manual_callback):
                 log.warning("  重试仍失败: %s (%s)",
                             profile["name"] or "(未命名)", profile["id"])
             else:
@@ -592,7 +614,7 @@ def run(
     elapsed = int(time.time() - started)
     log.info("=" * 60)
     log.info(
-        "完成: 成功 %d（token %d / 密码 %d）/ 全部失败 %d / 受限 %d / 异常 %d / 窗口失败 %d，用时 %ds",
+        "完成: 成功 %d（token %d / 密码 %d）/ 全部失败 %d / 受限 %d / 异常 %d / 窗口失败 %d / 已登录跳过 %d，用时 %ds",
         stats["ok"],
         stats["token_ok"],
         stats["pwd_ok"],
@@ -600,6 +622,7 @@ def run(
         stats["restricted"],
         stats["error"],
         stats["window_error"],
+        stats["skip_logged_in"],
         elapsed,
     )
     log.info("表格统计: %s", store.summary())

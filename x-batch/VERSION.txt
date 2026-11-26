@@ -1,3 +1,10 @@
+x-batch 1.4.6
+build: 2026-11-26
+changes:
+  - 新增：窗口已有 X 登录态时自动跳过本窗口（登录前 check_session 预检查），不再注入新 token 覆盖现有会话，并计入「已登录跳过」统计
+  - 加固：token 已标记成功（token登录=成功）但状态列因故未写入时，下次也会跳过，避免重复使用同一 token
+  - 修复：成功登录后因 manual_callback 未透传导致的 NameError 崩溃（v1.4.5 回归）
+
 x-batch 1.4.5
 build: 2026-11-26
 changes:

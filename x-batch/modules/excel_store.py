@@ -203,14 +203,25 @@ class ExcelStore:
         return rows
 
     def pending_rows(self) -> List[AccountRow]:
-        """可处理的记录：按行号范围与「仅重跑失败」模式过滤。"""
+        """可处理的记录：按行号范围与「仅重跑失败」模式过滤。
+
+        除「状态」列外，也会跳过「token登录=成功」的行：即便上一轮在
+        写状态列前被中断（状态仍为空），已成功注入的 token 也不会被重复使用。
+        """
         if self.retry_failed_only:
             pending_status = {STATUS_FAILED, STATUS_RESTRICTED, STATUS_ERROR}
         else:
             pending_status = {"", STATUS_UNUSED, STATUS_ERROR, "未处理"}
+        token_login_col = self._optional_column(COL_TOKEN_LOGIN)
         result: List[AccountRow] = []
         for row in self.rows:
             if row.status not in pending_status:
+                continue
+            # token 已登录成功但状态列因故未写入时，同样跳过，避免重复注入
+            if (
+                token_login_col
+                and self._cell_text(row.sheet_row, token_login_col) == TOKEN_OK
+            ):
                 continue
             if self.row_start > 0 and row.sheet_row < self.row_start:
                 continue

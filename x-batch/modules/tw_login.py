@@ -203,6 +203,32 @@ def login_with_token(
     return LoginResult(ERROR, detail="判定超时，未出现登录标识")
 
 
+def check_session(
+    context: BrowserContext,
+    home_url: str = "https://x.com/home",
+    timeout: int = 15,
+) -> LoginResult:
+    """不注入 token，只检查窗口里已有的登录状态（养号用）。"""
+    page = _get_page(context)
+    try:
+        if "x.com" not in (page.url or ""):
+            page.goto(home_url, wait_until="domcontentloaded", timeout=timeout * 1000)
+    except Exception as exc:
+        return LoginResult(ERROR, detail=f"打开 x.com 失败: {exc}")
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        state = _probe(page)
+        if state == OK:
+            return LoginResult(OK, username=_read_username(page), detail="已有登录态")
+        if state == RESTRICTED:
+            return LoginResult(RESTRICTED, detail="账号受限/需要验证")
+        if state == INVALID:
+            return LoginResult(INVALID, detail="窗口内未登录")
+        time.sleep(1.0)
+    return LoginResult(ERROR, detail="检查登录态超时")
+
+
 # ------------------------------------------------------------ 账号密码登录
 USERNAME_INPUTS = (
     'input[autocomplete="username"]',

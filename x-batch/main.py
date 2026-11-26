@@ -15,13 +15,11 @@ from __future__ import annotations
 import argparse
 import logging
 import random
-import sys
 import threading
 import time
-from pathlib import Path
-from queue import Queue
 from typing import Dict, List, Optional
 
+from modules.applog import QueueLogHandler, setup_logging
 from modules.browser import BrowserManager, IxBrowserError
 from modules.config import Settings, load_settings
 from modules.excel_store import (
@@ -45,50 +43,9 @@ from modules.excel_store import (
     ExcelStore,
 )
 from modules.state_db import StateDB
-from modules import tw_login, twofa, wallet
+from modules import humanize, tw_login, twofa, wallet
 
 log = logging.getLogger("x-batch")
-
-
-# ----------------------------------------------------------------- 日志系统
-class QueueLogHandler(logging.Handler):
-    """把 log 记录推到一个 Queue，GUI 线程从 Queue 读出来显示。"""
-
-    def __init__(self, queue: Queue):
-        super().__init__()
-        self._q = queue
-        self.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            self._q.put(self.format(record))
-        except Exception:
-            pass
-
-
-def setup_logging(
-    settings: Settings,
-    gui_queue: Optional[Queue] = None,
-) -> None:
-    log_dir = Path(settings.output.log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"run_{time.strftime('%Y%m%d_%H%M%S')}.log"
-
-    root = logging.getLogger()
-    root.handlers.clear()
-    root.setLevel(logging.INFO)
-
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    console = logging.StreamHandler(sys.stdout)
-    console.setFormatter(formatter)
-    root.addHandler(console)
-
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    root.addHandler(file_handler)
-
-    if gui_queue is not None:
-        root.addHandler(QueueLogHandler(gui_queue))
 
 
 # ------------------------------------------------------------------ 辅助
@@ -163,6 +120,24 @@ def _sleep(seconds: float, stop_event: Optional[threading.Event]) -> bool:
     return True
 
 
+def _pre_login_browse(context, settings: Settings, stop_event) -> None:
+    """注入 token 前先像普通访客一样浏览，降低机械登录特征。"""
+    cfg = settings.randomize
+    seconds = random.randint(
+        max(1, min(cfg.warm_seconds_min, cfg.warm_seconds_max)),
+        max(1, max(cfg.warm_seconds_min, cfg.warm_seconds_max)),
+    )
+    log.info("  登录前先浏览约 %d 秒 ...", seconds)
+    try:
+        pages = [p for p in context.pages if not p.is_closed()]
+        page = pages[0] if pages else context.new_page()
+        humanize.warm_browse(
+            page, settings.twitter.home_url, seconds, stop_event
+        )
+    except Exception as exc:
+        log.debug("  访客浏览失败（忽略）: %s", exc)
+
+
 def _token_text(result) -> str:
     if result is None:
         return TOKEN_UNKNOWN
@@ -213,6 +188,8 @@ def process_profile(
 
     tried = 0
     try:
+        if settings.randomize.warm_before_login:
+            _pre_login_browse(context, settings, stop_event)
         while pending and tried < settings.twitter.max_tokens_per_profile:
             if stop_event is not None and stop_event.is_set():
                 log.warning("  收到停止信号，结束当前窗口")
@@ -455,6 +432,15 @@ def run(
         log.info("没有待处理的记录，退出")
         return 0
 
+    # 行为随机化：打乱账号顺序 + 限制本次处理数量
+    rnd = settings.randomize
+    if rnd.shuffle_rows:
+        random.shuffle(pending)
+        log.info("(随机化) 已打乱待处理账号顺序")
+    if rnd.daily_limit > 0 and len(pending) > rnd.daily_limit:
+        pending = pending[: rnd.daily_limit]
+        log.info("(随机化) 本次最多处理 %d 条记录", rnd.daily_limit)
+
     try:
         bm = BrowserManager(settings.ixbrowser)
         profiles = bm.list_profiles()
@@ -473,6 +459,11 @@ def run(
         profiles = profiles[start - 1 : end]
     else:
         profiles = profiles[start - 1 :]
+
+    if rnd.shuffle_profiles and profiles:
+        random.shuffle(profiles)
+        log.info("(随机化) 已打乱窗口顺序")
+
     if settings.ixbrowser.profile_limit > 0:
         profiles = profiles[: settings.ixbrowser.profile_limit]
 
@@ -494,14 +485,48 @@ def run(
         "window_error": 0,
     }
     started = time.time()
+    batch_done = 0
     try:
-        for profile in profiles:
+        for index, profile in enumerate(profiles):
             if stop_event is not None and stop_event.is_set():
                 log.warning("用户请求停止，保存后退出 ...")
                 break
             if not pending:
                 break
+
+            # 账号之间的随机间隔（第一个窗口不等待）
+            if index > 0:
+                gap = random.uniform(
+                    min(rnd.account_delay_min, rnd.account_delay_max),
+                    max(rnd.account_delay_min, rnd.account_delay_max),
+                )
+                gap = max(0.0, gap)
+                if gap > 0:
+                    log.info("(随机化) 等待 %d 秒后处理下一个窗口 ...", int(gap))
+                    if not _sleep(gap, stop_event):
+                        break
+
             process_profile(bm, profile, pending, settings, store, db, stats, stop_event)
+            batch_done += 1
+
+            # 每处理 N 个窗口后长休息，模拟真人分批操作
+            if (
+                rnd.batch_size > 0
+                and batch_done % rnd.batch_size == 0
+                and pending
+                and (stop_event is None or not stop_event.is_set())
+            ):
+                rest = random.uniform(
+                    min(rnd.batch_rest_min, rnd.batch_rest_max),
+                    max(rnd.batch_rest_min, rnd.batch_rest_max),
+                )
+                log.info(
+                    "(随机化) 已处理 %d 个窗口，长休息 %d 秒 ...",
+                    batch_done,
+                    int(rest),
+                )
+                if not _sleep(rest, stop_event):
+                    break
     except KeyboardInterrupt:
         log.warning("收到中断，正在保存 ...")
     finally:
@@ -534,6 +559,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--excel", default="", help="临时覆盖 token 表路径")
     parser.add_argument("--limit", type=int, default=-1, help="本次最多处理多少个窗口")
     parser.add_argument("--skip-wallet", action="store_true", help="本次不处理钱包")
+    parser.add_argument("--warmup", action="store_true", help="改为运行养号任务")
+    parser.add_argument(
+        "--warmup-accounts", type=int, default=-1, help="本次最多养几个号（0=全部）"
+    )
     return parser.parse_args()
 
 
@@ -546,6 +575,12 @@ def main() -> int:
         settings.ixbrowser.profile_limit = args.limit
     if args.skip_wallet:
         settings.wallet.enabled = False
+    if args.warmup_accounts >= 0:
+        settings.warmup.accounts_per_run = args.warmup_accounts
+    if args.warmup:
+        from modules import warmup
+
+        return warmup.run(settings)
     return run(settings)
 
 

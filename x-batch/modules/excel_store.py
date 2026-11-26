@@ -43,6 +43,8 @@ COL_MNEMONIC = "助记词"
 COL_PASSWORD = "钱包密码"
 COL_TIME = "处理时间"
 COL_NOTE = "备注"
+COL_WARMUP_COUNT = "养号次数"
+COL_WARMUP_TIME = "最后养号时间"
 
 EXTRA_COLUMNS = [
     COL_STATUS,
@@ -57,6 +59,8 @@ EXTRA_COLUMNS = [
     COL_PASSWORD,
     COL_TIME,
     COL_NOTE,
+    COL_WARMUP_COUNT,
+    COL_WARMUP_TIME,
 ]
 
 
@@ -217,6 +221,27 @@ class ExcelStore:
             return ""
         value = self.ws.cell(row=row.sheet_row, column=self.ct0_col).value
         return str(value).strip() if value else ""
+
+    def value_of(self, row: AccountRow, name: str) -> str:
+        """读取任意列的值（列不存在时返回空字符串）。"""
+        return self._cell_text(row.sheet_row, self._optional_column(name))
+
+    def bump_warmup(self, row: AccountRow) -> int:
+        """养号次数 +1 并记录时间，返回新的次数。"""
+        raw = self.value_of(row, COL_WARMUP_COUNT)
+        try:
+            count = int(float(raw))
+        except (TypeError, ValueError):
+            count = 0
+        count += 1
+        self.update(
+            row,
+            **{
+                COL_WARMUP_COUNT: count,
+                COL_WARMUP_TIME: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        )
+        return count
 
     def is_write_locked(self) -> bool:
         """检测原表是否被 Excel/WPS 占用（占用时无法写回）。"""

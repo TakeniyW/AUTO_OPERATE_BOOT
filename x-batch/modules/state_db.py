@@ -58,6 +58,28 @@ class StateDB:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS warmup_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    day TEXT,
+                    account TEXT,
+                    profile TEXT,
+                    actions INTEGER DEFAULT 0,
+                    likes INTEGER DEFAULT 0,
+                    retweets INTEGER DEFAULT 0,
+                    bookmarks INTEGER DEFAULT 0,
+                    follows INTEGER DEFAULT 0,
+                    seconds INTEGER DEFAULT 0,
+                    note TEXT,
+                    created_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_warmup_day_account "
+                "ON warmup_log(day, account)"
+            )
 
     def upsert(self, sheet_row: int, **fields) -> None:
         data = {k: v for k, v in fields.items() if k in _ALLOWED and v is not None}
@@ -106,3 +128,74 @@ class StateDB:
                 "SELECT final_status, COUNT(*) AS c FROM records GROUP BY final_status"
             ).fetchall()
         return {(row["final_status"] or FINAL_PENDING): row["c"] for row in rows}
+
+    # ------------------------------------------------------------ 养号记录
+    @staticmethod
+    def today() -> str:
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def warmup_add(
+        self,
+        account: str,
+        profile: str = "",
+        actions: int = 0,
+        likes: int = 0,
+        retweets: int = 0,
+        bookmarks: int = 0,
+        follows: int = 0,
+        seconds: int = 0,
+        note: str = "",
+        day: str = "",
+    ) -> None:
+        day = day or self.today()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO warmup_log (day, account, profile, actions, likes, "
+                "retweets, bookmarks, follows, seconds, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    day,
+                    account,
+                    profile,
+                    actions,
+                    likes,
+                    retweets,
+                    bookmarks,
+                    follows,
+                    seconds,
+                    note,
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            )
+
+    def warmup_count_today(self, account: str, day: str = "") -> int:
+        day = day or self.today()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM warmup_log WHERE day = ? AND account = ?",
+                (day, account),
+            ).fetchone()
+        return int(row["c"]) if row else 0
+
+    def warmup_last(self, account: str) -> Dict[str, str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM warmup_log WHERE account = ? ORDER BY id DESC LIMIT 1",
+                (account,),
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def warmup_summary_today(self, day: str = "") -> Dict[str, int]:
+        day = day or self.today()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS accounts, "
+                "COALESCE(SUM(actions), 0) AS actions, "
+                "COALESCE(SUM(likes), 0) AS likes, "
+                "COALESCE(SUM(retweets), 0) AS retweets, "
+                "COALESCE(SUM(follows), 0) AS follows "
+                "FROM warmup_log WHERE day = ?",
+                (day,),
+            ).fetchone()
+        return {k: int(row[k]) for k in ("accounts", "actions", "likes", "retweets", "follows")} if row else {}
+

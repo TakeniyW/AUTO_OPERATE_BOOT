@@ -16,7 +16,7 @@ from pathlib import Path
 from queue import Empty
 from tkinter import filedialog, messagebox, ttk
 
-APP_TITLE = "x-batch v1.3.2 · ixBrowser 批量推特登录 + 钱包初始化"
+APP_TITLE = "x-batch v1.4.0 · ixBrowser 批量推特登录 + 钱包初始化 + 养号"
 
 _WORKDIR = Path(__file__).parent.resolve()
 _STARTUP_LOG = _WORKDIR / "startup_error.log"
@@ -82,8 +82,8 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("960x720")
-        self.minsize(840, 620)
+        self.geometry("1020x760")
+        self.minsize(900, 680)
 
         self._workdir = Path(__file__).parent.resolve()
         self._config_path = self._workdir / "config.yaml"
@@ -133,13 +133,17 @@ class App(tk.Tk):
         self._tab_ix = self._build_ix_tab(nb)
         self._tab_tw = self._build_tw_tab(nb)
         self._tab_wallet = self._build_wallet_tab(nb)
+        self._tab_random = self._build_random_tab(nb)
+        self._tab_warmup = self._build_warmup_tab(nb)
         self._tab_records = self._build_records_tab(nb)
 
         nb.add(self._tab_excel, text="① Excel")
         nb.add(self._tab_ix, text="② ixBrowser")
         nb.add(self._tab_tw, text="③ Twitter")
         nb.add(self._tab_wallet, text="④ 钱包")
-        nb.add(self._tab_records, text="⑤ 记录查询")
+        nb.add(self._tab_random, text="⑤ 随机化")
+        nb.add(self._tab_warmup, text="⑥ 养号")
+        nb.add(self._tab_records, text="⑦ 记录查询")
 
         # ---- 右：统计 + 日志
         right = ttk.Frame(body, padding=(6, 6, 0, 6))
@@ -157,6 +161,10 @@ class App(tk.Tk):
             ("restricted", "⚠️ 受限"),
             ("error", "❗ 异常"),
             ("window_error", "窗口失败"),
+            ("warm_ok", "🌱 养号账号"),
+            ("warm_likes", "👍 点赞"),
+            ("warm_retweets", "🔁 转推"),
+            ("warm_follows", "👥 关注"),
         ]:
             row = ttk.Frame(stats_frame)
             row.pack(fill=tk.X, pady=1)
@@ -365,6 +373,192 @@ class App(tk.Tk):
         )
         return f
 
+    def _build_random_tab(self, parent: ttk.Widget) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=10)
+        f.columnconfigure(1, weight=1)
+
+        self._rnd_shuffle_rows_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            f, text="打乱待处理账号顺序", variable=self._rnd_shuffle_rows_var
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=3)
+
+        self._rnd_shuffle_profiles_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f, text="打乱窗口顺序（按序号指定窗口时建议关闭）",
+            variable=self._rnd_shuffle_profiles_var,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=3)
+
+        ttk.Label(f, text="账号之间随机等待").grid(row=2, column=0, sticky="w", pady=3)
+        row = ttk.Frame(f); row.grid(row=2, column=1, sticky="w", pady=3, padx=4)
+        self._rnd_gap_min_var = tk.StringVar(value="20")
+        self._rnd_gap_max_var = tk.StringVar(value="90")
+        ttk.Entry(row, textvariable=self._rnd_gap_min_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(row, text="~").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(row, textvariable=self._rnd_gap_max_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(row, text="秒").pack(side=tk.LEFT, padx=4)
+
+        ttk.Label(f, text="每处理 N 个窗口后长休息").grid(row=3, column=0, sticky="w", pady=3)
+        row = ttk.Frame(f); row.grid(row=3, column=1, sticky="w", pady=3, padx=4)
+        self._rnd_batch_var = tk.StringVar(value="0")
+        ttk.Entry(row, textvariable=self._rnd_batch_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(row, text="个，休息").pack(side=tk.LEFT, padx=4)
+        self._rnd_rest_min_var = tk.StringVar(value="300")
+        self._rnd_rest_max_var = tk.StringVar(value="900")
+        ttk.Entry(row, textvariable=self._rnd_rest_min_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(row, text="~").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(row, textvariable=self._rnd_rest_max_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(row, text="秒").pack(side=tk.LEFT, padx=4)
+
+        ttk.Label(f, text="本次最多处理记录数").grid(row=4, column=0, sticky="w", pady=3)
+        self._rnd_limit_var = tk.StringVar(value="0")
+        ttk.Entry(f, textvariable=self._rnd_limit_var, width=8).grid(
+            row=4, column=1, sticky="w", pady=3, padx=4
+        )
+        ttk.Label(f, text="(0=不限)", foreground="#7f8c8d").grid(
+            row=4, column=2, sticky="w", pady=3
+        )
+
+        self._rnd_warm_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f, text="登录前先以访客身份浏览一会儿（更接近真人）",
+            variable=self._rnd_warm_var,
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=3)
+
+        ttk.Label(f, text="访客浏览时长").grid(row=6, column=0, sticky="w", pady=3)
+        row = ttk.Frame(f); row.grid(row=6, column=1, sticky="w", pady=3, padx=4)
+        self._rnd_warm_min_var = tk.StringVar(value="5")
+        self._rnd_warm_max_var = tk.StringVar(value="15")
+        ttk.Entry(row, textvariable=self._rnd_warm_min_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(row, text="~").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(row, textvariable=self._rnd_warm_max_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(row, text="秒").pack(side=tk.LEFT, padx=4)
+
+        ttk.Label(
+            f,
+            text="随机化只改变节奏，不改变结果。建议账号间隔 20~90 秒、每 5 个窗口休息 5~15 分钟，\n"
+                 "并分多天完成，避免所有账号集中在同一时段。",
+            foreground="#7f8c8d", wraplength=400, justify="left",
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        return f
+
+    def _build_warmup_tab(self, parent: ttk.Widget) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=10)
+        f.columnconfigure(1, weight=1)
+
+        self._wm_enabled_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            f, text="启用养号功能", variable=self._wm_enabled_var
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=2)
+
+        ttk.Label(f, text="登录方式").grid(row=1, column=0, sticky="w", pady=2)
+        self._wm_login_mode_var = tk.StringVar(value="auto")
+        mode_row = ttk.Frame(f); mode_row.grid(row=1, column=1, columnspan=3, sticky="w", pady=2)
+        for value, label in [("auto", "有 token 用 token"), ("session", "只用窗口已有登录态")]:
+            ttk.Radiobutton(
+                mode_row, text=label, value=value, variable=self._wm_login_mode_var
+            ).pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Label(f, text="单号停留时长").grid(row=2, column=0, sticky="w", pady=2)
+        row = ttk.Frame(f); row.grid(row=2, column=1, columnspan=3, sticky="w", pady=2)
+        self._wm_session_min_var = tk.StringVar(value="120")
+        self._wm_session_max_var = tk.StringVar(value="300")
+        ttk.Entry(row, textvariable=self._wm_session_min_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(row, text="~").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(row, textvariable=self._wm_session_max_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(row, text="秒").pack(side=tk.LEFT, padx=4)
+
+        ttk.Label(f, text="本次养号账号数").grid(row=3, column=0, sticky="w", pady=2)
+        row = ttk.Frame(f); row.grid(row=3, column=1, columnspan=3, sticky="w", pady=2)
+        self._wm_accounts_var = tk.StringVar(value="0")
+        ttk.Entry(row, textvariable=self._wm_accounts_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(row, text="(0=全部)   每号每天").pack(side=tk.LEFT, padx=4)
+        self._wm_daily_var = tk.StringVar(value="1")
+        ttk.Entry(row, textvariable=self._wm_daily_var, width=4).pack(side=tk.LEFT)
+        ttk.Label(row, text="次").pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(f, text="滚动后停留").grid(row=4, column=0, sticky="w", pady=2)
+        row = ttk.Frame(f); row.grid(row=4, column=1, columnspan=3, sticky="w", pady=2)
+        self._wm_scroll_min_var = tk.StringVar(value="2.0")
+        self._wm_scroll_max_var = tk.StringVar(value="7.0")
+        ttk.Entry(row, textvariable=self._wm_scroll_min_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(row, text="~").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(row, textvariable=self._wm_scroll_max_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(row, text="秒   最多滚动").pack(side=tk.LEFT, padx=4)
+        self._wm_max_scrolls_var = tk.StringVar(value="20")
+        ttk.Entry(row, textvariable=self._wm_max_scrolls_var, width=5).pack(side=tk.LEFT)
+        ttk.Label(row, text="次").pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(f, text="点赞概率 / 上限").grid(row=5, column=0, sticky="w", pady=2)
+        row = ttk.Frame(f); row.grid(row=5, column=1, columnspan=3, sticky="w", pady=2)
+        self._wm_like_prob_var = tk.StringVar(value="25")
+        self._wm_max_likes_var = tk.StringVar(value="6")
+        ttk.Entry(row, textvariable=self._wm_like_prob_var, width=5).pack(side=tk.LEFT)
+        ttk.Label(row, text="%  最多").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(row, textvariable=self._wm_max_likes_var, width=5).pack(side=tk.LEFT)
+        ttk.Label(row, text="个").pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(f, text="转推概率 / 上限").grid(row=6, column=0, sticky="w", pady=2)
+        row = ttk.Frame(f); row.grid(row=6, column=1, columnspan=3, sticky="w", pady=2)
+        self._wm_rt_prob_var = tk.StringVar(value="3")
+        self._wm_max_rt_var = tk.StringVar(value="2")
+        ttk.Entry(row, textvariable=self._wm_rt_prob_var, width=5).pack(side=tk.LEFT)
+        ttk.Label(row, text="%  最多").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(row, textvariable=self._wm_max_rt_var, width=5).pack(side=tk.LEFT)
+        ttk.Label(row, text="个").pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(f, text="关注概率 / 上限").grid(row=7, column=0, sticky="w", pady=2)
+        row = ttk.Frame(f); row.grid(row=7, column=1, columnspan=3, sticky="w", pady=2)
+        self._wm_follow_prob_var = tk.StringVar(value="4")
+        self._wm_max_follow_var = tk.StringVar(value="1")
+        ttk.Entry(row, textvariable=self._wm_follow_prob_var, width=5).pack(side=tk.LEFT)
+        ttk.Label(row, text="%  最多").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(row, textvariable=self._wm_max_follow_var, width=5).pack(side=tk.LEFT)
+        ttk.Label(row, text="个").pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(f, text="其他动作概率").grid(row=8, column=0, sticky="w", pady=2)
+        row = ttk.Frame(f); row.grid(row=8, column=1, columnspan=3, sticky="w", pady=2)
+        self._wm_video_prob_var = tk.StringVar(value="12")
+        self._wm_search_prob_var = tk.StringVar(value="30")
+        self._wm_profile_prob_var = tk.StringVar(value="25")
+        ttk.Label(row, text="视频").pack(side=tk.LEFT)
+        ttk.Entry(row, textvariable=self._wm_video_prob_var, width=4).pack(side=tk.LEFT, padx=2)
+        ttk.Label(row, text="%  搜索").pack(side=tk.LEFT)
+        ttk.Entry(row, textvariable=self._wm_search_prob_var, width=4).pack(side=tk.LEFT, padx=2)
+        ttk.Label(row, text="%  主页").pack(side=tk.LEFT)
+        ttk.Entry(row, textvariable=self._wm_profile_prob_var, width=4).pack(side=tk.LEFT, padx=2)
+        ttk.Label(row, text="%").pack(side=tk.LEFT)
+
+        ttk.Label(f, text="搜索关键词").grid(row=9, column=0, sticky="w", pady=2)
+        self._wm_keywords_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self._wm_keywords_var).grid(
+            row=9, column=1, columnspan=3, sticky="ew", pady=2, padx=4
+        )
+
+        ttk.Label(f, text="允许运行时段").grid(row=10, column=0, sticky="w", pady=2)
+        row = ttk.Frame(f); row.grid(row=10, column=1, columnspan=3, sticky="w", pady=2)
+        self._wm_hours_var = tk.StringVar()
+        ttk.Entry(row, textvariable=self._wm_hours_var, width=8).pack(side=tk.LEFT)
+        ttk.Label(row, text="(如 9-23，留空=不限)   账号间隔休息").pack(side=tk.LEFT, padx=4)
+        self._wm_rest_min_var = tk.StringVar(value="60")
+        self._wm_rest_max_var = tk.StringVar(value="240")
+        ttk.Entry(row, textvariable=self._wm_rest_min_var, width=5).pack(side=tk.LEFT)
+        ttk.Label(row, text="~").pack(side=tk.LEFT, padx=2)
+        ttk.Entry(row, textvariable=self._wm_rest_max_var, width=5).pack(side=tk.LEFT)
+        ttk.Label(row, text="秒").pack(side=tk.LEFT, padx=2)
+
+        self._warmup_btn = ttk.Button(
+            f, text="🌱 开始养号", command=self._on_start_warmup
+        )
+        self._warmup_btn.grid(row=11, column=0, columnspan=4, sticky="w", pady=(10, 2))
+
+        ttk.Label(
+            f,
+            text="养号只做浏览、点赞、转推、收藏、关注、搜索等轻量动作，不会发文或改资料。\n"
+                 "建议每天固定时段跑一次，配合 ixBrowser 窗口各自的代理 IP 使用。",
+            foreground="#7f8c8d", wraplength=420, justify="left",
+        ).grid(row=12, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        return f
+
     # -------------------------------------------------------- 记录查询页签
     def _build_records_tab(self, parent: ttk.Widget) -> ttk.Frame:
         f = ttk.Frame(parent, padding=10)
@@ -476,6 +670,43 @@ class App(tk.Tk):
         self._wallet_fallback_var.set(s.wallet.manual_fallback)
         self._on_pwd_login_toggle()
 
+        r = s.randomize
+        self._rnd_shuffle_rows_var.set(r.shuffle_rows)
+        self._rnd_shuffle_profiles_var.set(r.shuffle_profiles)
+        self._rnd_gap_min_var.set(str(r.account_delay_min))
+        self._rnd_gap_max_var.set(str(r.account_delay_max))
+        self._rnd_batch_var.set(str(r.batch_size))
+        self._rnd_rest_min_var.set(str(r.batch_rest_min))
+        self._rnd_rest_max_var.set(str(r.batch_rest_max))
+        self._rnd_limit_var.set(str(r.daily_limit))
+        self._rnd_warm_var.set(r.warm_before_login)
+        self._rnd_warm_min_var.set(str(r.warm_seconds_min))
+        self._rnd_warm_max_var.set(str(r.warm_seconds_max))
+
+        w = s.warmup
+        self._wm_enabled_var.set(w.enabled)
+        self._wm_login_mode_var.set(w.login_mode)
+        self._wm_session_min_var.set(str(w.session_min))
+        self._wm_session_max_var.set(str(w.session_max))
+        self._wm_accounts_var.set(str(w.accounts_per_run))
+        self._wm_daily_var.set(str(w.daily_per_account))
+        self._wm_scroll_min_var.set(str(w.scroll_min))
+        self._wm_scroll_max_var.set(str(w.scroll_max))
+        self._wm_max_scrolls_var.set(str(w.max_scrolls))
+        self._wm_like_prob_var.set(str(int(w.like_prob * 100)))
+        self._wm_max_likes_var.set(str(w.max_likes))
+        self._wm_rt_prob_var.set(str(int(w.retweet_prob * 100)))
+        self._wm_max_rt_var.set(str(w.max_retweets))
+        self._wm_follow_prob_var.set(str(int(w.follow_prob * 100)))
+        self._wm_max_follow_var.set(str(w.max_follows))
+        self._wm_video_prob_var.set(str(int(w.video_prob * 100)))
+        self._wm_search_prob_var.set(str(int(w.search_prob * 100)))
+        self._wm_profile_prob_var.set(str(int(w.profile_prob * 100)))
+        self._wm_keywords_var.set("，".join(w.keywords))
+        self._wm_hours_var.set(w.active_hours)
+        self._wm_rest_min_var.set(str(w.rest_min))
+        self._wm_rest_max_var.set(str(w.rest_max))
+
     def _on_pwd_login_toggle(self) -> None:
         """账号密码登录关闭时，把相关列名输入框置灰，避免误解为必填。"""
         enabled = bool(self._tw_pwd_login_var.get())
@@ -534,6 +765,43 @@ class App(tk.Tk):
         s.wallet.password_prefix = self._wallet_pfx_var.get().strip() or "Wx"
         s.wallet.password_length = _int(self._wallet_plen_var, 14)
         s.wallet.manual_fallback = bool(self._wallet_fallback_var.get())
+
+        s.randomize.shuffle_rows = bool(self._rnd_shuffle_rows_var.get())
+        s.randomize.shuffle_profiles = bool(self._rnd_shuffle_profiles_var.get())
+        s.randomize.account_delay_min = _float(self._rnd_gap_min_var, 20.0)
+        s.randomize.account_delay_max = _float(self._rnd_gap_max_var, 90.0)
+        s.randomize.batch_size = max(0, _int(self._rnd_batch_var, 0))
+        s.randomize.batch_rest_min = _float(self._rnd_rest_min_var, 300.0)
+        s.randomize.batch_rest_max = _float(self._rnd_rest_max_var, 900.0)
+        s.randomize.daily_limit = max(0, _int(self._rnd_limit_var, 0))
+        s.randomize.warm_before_login = bool(self._rnd_warm_var.get())
+        s.randomize.warm_seconds_min = max(1, _int(self._rnd_warm_min_var, 5))
+        s.randomize.warm_seconds_max = max(1, _int(self._rnd_warm_max_var, 15))
+
+        w = s.warmup
+        w.enabled = bool(self._wm_enabled_var.get())
+        w.login_mode = self._wm_login_mode_var.get().strip() or "auto"
+        w.session_min = max(10, _int(self._wm_session_min_var, 120))
+        w.session_max = max(w.session_min, _int(self._wm_session_max_var, 300))
+        w.accounts_per_run = max(0, _int(self._wm_accounts_var, 0))
+        w.daily_per_account = max(1, _int(self._wm_daily_var, 1))
+        w.scroll_min = _float(self._wm_scroll_min_var, 2.0)
+        w.scroll_max = _float(self._wm_scroll_max_var, 7.0)
+        w.max_scrolls = max(1, _int(self._wm_max_scrolls_var, 20))
+        w.like_prob = max(0.0, _float(self._wm_like_prob_var, 25) / 100.0)
+        w.max_likes = max(0, _int(self._wm_max_likes_var, 6))
+        w.retweet_prob = max(0.0, _float(self._wm_rt_prob_var, 3) / 100.0)
+        w.max_retweets = max(0, _int(self._wm_max_rt_var, 2))
+        w.follow_prob = max(0.0, _float(self._wm_follow_prob_var, 4) / 100.0)
+        w.max_follows = max(0, _int(self._wm_max_follow_var, 1))
+        w.video_prob = max(0.0, _float(self._wm_video_prob_var, 12) / 100.0)
+        w.search_prob = max(0.0, _float(self._wm_search_prob_var, 30) / 100.0)
+        w.profile_prob = max(0.0, _float(self._wm_profile_prob_var, 25) / 100.0)
+        raw_keywords = self._wm_keywords_var.get().replace("，", ",")
+        w.keywords = [k.strip() for k in raw_keywords.split(",") if k.strip()]
+        w.active_hours = self._wm_hours_var.get().strip()
+        w.rest_min = max(0, _int(self._wm_rest_min_var, 60))
+        w.rest_max = max(w.rest_min, _int(self._wm_rest_max_var, 240))
 
         return s
 
@@ -615,6 +883,45 @@ class App(tk.Tk):
                     "log_dir": s.output.log_dir,
                     "screenshot_dir": s.output.screenshot_dir,
                     "state_db": s.output.state_db,
+                },
+                "randomize": {
+                    "shuffle_rows": s.randomize.shuffle_rows,
+                    "shuffle_profiles": s.randomize.shuffle_profiles,
+                    "account_delay_min": s.randomize.account_delay_min,
+                    "account_delay_max": s.randomize.account_delay_max,
+                    "batch_size": s.randomize.batch_size,
+                    "batch_rest_min": s.randomize.batch_rest_min,
+                    "batch_rest_max": s.randomize.batch_rest_max,
+                    "daily_limit": s.randomize.daily_limit,
+                    "warm_before_login": s.randomize.warm_before_login,
+                    "warm_seconds_min": s.randomize.warm_seconds_min,
+                    "warm_seconds_max": s.randomize.warm_seconds_max,
+                },
+                "warmup": {
+                    "enabled": s.warmup.enabled,
+                    "login_mode": s.warmup.login_mode,
+                    "session_min": s.warmup.session_min,
+                    "session_max": s.warmup.session_max,
+                    "scroll_min": s.warmup.scroll_min,
+                    "scroll_max": s.warmup.scroll_max,
+                    "max_scrolls": s.warmup.max_scrolls,
+                    "like_prob": s.warmup.like_prob,
+                    "max_likes": s.warmup.max_likes,
+                    "retweet_prob": s.warmup.retweet_prob,
+                    "max_retweets": s.warmup.max_retweets,
+                    "bookmark_prob": s.warmup.bookmark_prob,
+                    "max_bookmarks": s.warmup.max_bookmarks,
+                    "follow_prob": s.warmup.follow_prob,
+                    "max_follows": s.warmup.max_follows,
+                    "video_prob": s.warmup.video_prob,
+                    "search_prob": s.warmup.search_prob,
+                    "profile_prob": s.warmup.profile_prob,
+                    "keywords": s.warmup.keywords,
+                    "accounts_per_run": s.warmup.accounts_per_run,
+                    "daily_per_account": s.warmup.daily_per_account,
+                    "active_hours": s.warmup.active_hours,
+                    "rest_min": s.warmup.rest_min,
+                    "rest_max": s.warmup.rest_max,
                 },
             }
             with open(self._config_path, "w", encoding="utf-8") as f:
@@ -706,12 +1013,29 @@ class App(tk.Tk):
             # 让 GUI 上 radio 覆盖
             pass
 
+        self._launch("login", s)
+
+    def _on_start_warmup(self) -> None:
+        if self._is_running:
+            messagebox.showinfo("提示", "已有任务在运行，请先停止")
+            return
+        s = self._collect_settings()
+        if not Path(s.excel.path).exists():
+            messagebox.showerror("参数错误", f"Excel 不存在:\n{s.excel.path}")
+            return
+        if not s.warmup.enabled:
+            messagebox.showerror("参数错误", "养号功能未启用（⑥ 养号页签）")
+            return
+        self._launch("warmup", s)
+
+    def _launch(self, mode: str, s: Settings) -> None:
         # 界面上的参数直接写回 config.yaml，避免还要手动改文件
         self._save_config(silent=True)
 
         self._reset_log()
         self._reset_stats()
 
+        self._task_mode = mode
         self._stop_event = threading.Event()
         self._log_queue = queue.Queue()
         self._is_running = True
@@ -719,7 +1043,7 @@ class App(tk.Tk):
 
         try:
             self._worker = threading.Thread(
-                target=self._run_worker, args=(s,), daemon=True
+                target=self._run_worker, args=(s, mode), daemon=True
             )
             self._worker.start()
         except Exception as exc:
@@ -734,9 +1058,14 @@ class App(tk.Tk):
         self._stop_event.set()
         self._append_log("[INFO] 收到停止信号，等当前窗口结束 ...")
 
-    def _run_worker(self, s: Settings) -> None:
+    def _run_worker(self, s: Settings, mode: str = "login") -> None:
         try:
-            run(s, gui_queue=self._log_queue, stop_event=self._stop_event)
+            if mode == "warmup":
+                from modules.warmup import run as warmup_run
+
+                warmup_run(s, gui_queue=self._log_queue, stop_event=self._stop_event)
+            else:
+                run(s, gui_queue=self._log_queue, stop_event=self._stop_event)
         except Exception as exc:
             self._log_queue.put(f"[ERROR] 运行异常: {exc}")
         finally:
@@ -749,11 +1078,19 @@ class App(tk.Tk):
     def _set_running_state(self, running: bool) -> None:
         self._is_running = running
         if running:
-            self._status_dot.config(fg=COLOR_RUNNING); self._status_label.config(text="运行中 ...")
-            self._start_btn.config(state=tk.DISABLED); self._stop_btn.config(state=tk.NORMAL)
+            self._status_dot.config(fg=COLOR_RUNNING)
+            self._status_label.config(
+                text="养号中 ..." if getattr(self, "_task_mode", "") == "warmup" else "运行中 ..."
+            )
+            self._start_btn.config(state=tk.DISABLED)
+            self._stop_btn.config(state=tk.NORMAL)
+            self._warmup_btn.config(state=tk.DISABLED)
         else:
-            self._status_dot.config(fg=COLOR_IDLE); self._status_label.config(text="空闲")
-            self._start_btn.config(state=tk.NORMAL); self._stop_btn.config(state=tk.DISABLED)
+            self._status_dot.config(fg=COLOR_IDLE)
+            self._status_label.config(text="空闲")
+            self._start_btn.config(state=tk.NORMAL)
+            self._stop_btn.config(state=tk.DISABLED)
+            self._warmup_btn.config(state=tk.NORMAL)
 
     # ----------------------------------------------------------- 日志刷新
     def _reset_log(self) -> None:
@@ -790,6 +1127,8 @@ class App(tk.Tk):
 
     def _refresh_stats(self) -> None:
         """从日志反推统计，避免主流程与 GUI 之间再加一套回调。"""
+        import re
+
         text = self._log_text.get("1.0", tk.END)
         stats = {k: 0 for k in self._stat_vars}
         for line in text.splitlines():
@@ -805,6 +1144,15 @@ class App(tk.Tk):
                 stats["error"] += 1
             elif "打开/连接窗口失败" in line:
                 stats["window_error"] += 1
+            match = re.search(
+                r"养号结束: 成功 (\d+) / 跳过 \d+，点赞 (\d+) / 转推 (\d+) / 关注 (\d+)",
+                line,
+            )
+            if match:
+                stats["warm_ok"] = int(match.group(1))
+                stats["warm_likes"] = int(match.group(2))
+                stats["warm_retweets"] = int(match.group(3))
+                stats["warm_follows"] = int(match.group(4))
         stats["ok"] = stats["token_ok"] + stats["pwd_ok"]
         for key, value in stats.items():
             self._stat_vars[key].set(str(value))

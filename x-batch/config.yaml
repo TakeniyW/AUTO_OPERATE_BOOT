@@ -65,6 +65,64 @@ wallet:
   # 自动导入失败时，暂停等待人工在窗口内完成
   manual_fallback: true
 
+# ================= 行为随机化 =================
+# 用于批量登录：打乱顺序、随机间隔、分批休息，降低批量特征
+randomize:
+  # 打乱待处理账号顺序
+  shuffle_rows: true
+  # 打乱窗口顺序（用序号范围手动指定窗口时建议 false）
+  shuffle_profiles: false
+  # 两个账号之间的随机等待（秒）
+  account_delay_min: 20
+  account_delay_max: 90
+  # 每处理 N 个窗口后长休息，0 = 不休息
+  batch_size: 0
+  batch_rest_min: 300
+  batch_rest_max: 900
+  # 本次最多处理多少条记录，0 = 不限（配合多天分批）
+  daily_limit: 0
+  # 注入 token 前先以访客身份浏览一会儿
+  warm_before_login: false
+  warm_seconds_min: 5
+  warm_seconds_max: 15
+
+# ================= 养号 =================
+warmup:
+  enabled: true
+  # auto = 有 token 用 token 登录；session = 只用窗口里已有的登录态
+  login_mode: "auto"
+  # 单账号本次停留时长（秒）
+  session_min: 120
+  session_max: 300
+  # 滚动的随机停顿（秒）与单次最多滚动次数
+  scroll_min: 2.0
+  scroll_max: 7.0
+  max_scrolls: 20
+  # 点赞概率与单次上限
+  like_prob: 0.25
+  max_likes: 6
+  retweet_prob: 0.03
+  max_retweets: 2
+  bookmark_prob: 0.05
+  max_bookmarks: 2
+  follow_prob: 0.04
+  max_follows: 1
+  # 视频 / 搜索 / 个人主页 的触发概率
+  video_prob: 0.12
+  search_prob: 0.30
+  profile_prob: 0.25
+  # 搜索关键词（留空则不搜索）
+  keywords: ["AI", "Web3", "crypto", "technology"]
+  # 本次最多养几个号，0 = 全部符合条件的
+  accounts_per_run: 0
+  # 每个号每天最多养几次
+  daily_per_account: 1
+  # 允许运行时段，如 "9-23"；留空 = 不限
+  active_hours: ""
+  # 两个号之间的随机休息（秒）
+  rest_min: 60
+  rest_max: 240
+
 # ================= 输出 =================
 output:
   log_dir: "logs"

@@ -113,6 +113,10 @@ class ExcelStore:
         self.wb = load_workbook(self.path)
         self.ws = self.wb[cfg.sheet] if cfg.sheet else self.wb.active
 
+        self.row_start = max(0, int(getattr(cfg, "row_start", 0) or 0))
+        self.row_end = max(0, int(getattr(cfg, "row_end", 0) or 0))
+        self.retry_failed_only = bool(getattr(cfg, "retry_failed_only", False))
+
         self.header_row = self._find_header_row()
         self.columns: Dict[str, int] = {}
         for col in range(1, self.ws.max_column + 1):
@@ -199,9 +203,42 @@ class ExcelStore:
         return rows
 
     def pending_rows(self) -> List[AccountRow]:
-        """可处理的 token：未使用 / 空 / 上次异常中断。"""
-        pending_status = {"", STATUS_UNUSED, STATUS_ERROR, "未处理"}
-        return [row for row in self.rows if row.status in pending_status]
+        """可处理的记录：按行号范围与「仅重跑失败」模式过滤。"""
+        if self.retry_failed_only:
+            pending_status = {STATUS_FAILED, STATUS_RESTRICTED, STATUS_ERROR}
+        else:
+            pending_status = {"", STATUS_UNUSED, STATUS_ERROR, "未处理"}
+        result: List[AccountRow] = []
+        for row in self.rows:
+            if row.status not in pending_status:
+                continue
+            if self.row_start > 0 and row.sheet_row < self.row_start:
+                continue
+            if self.row_end > 0 and row.sheet_row > self.row_end:
+                continue
+            result.append(row)
+        return result
+
+    def reset_failed(self) -> int:
+        """清空失败/受限/异常行的状态与结果列，返回重置的行数。"""
+        reset_count = 0
+        for row in self.rows:
+            if row.status not in (STATUS_FAILED, STATUS_RESTRICTED, STATUS_ERROR):
+                continue
+            self.update(
+                row,
+                **{
+                    COL_STATUS: "",
+                    COL_FINAL: "",
+                    COL_TOKEN_LOGIN: TOKEN_UNKNOWN,
+                    COL_PASSWORD_LOGIN: PASSWORD_UNKNOWN,
+                },
+            )
+            row.status = ""
+            reset_count += 1
+        if reset_count:
+            self.save()
+        return reset_count
 
     # --------------------------------------------------------------- 写表
     def update(self, row: AccountRow, **fields) -> None:

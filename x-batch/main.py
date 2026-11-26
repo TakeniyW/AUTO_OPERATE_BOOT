@@ -20,7 +20,7 @@ import threading
 import time
 from typing import Dict, List, Optional
 
-from modules.applog import QueueLogHandler, setup_logging
+from modules.applog import QueueLogHandler, emit_stats, setup_logging
 from modules.browser import BrowserManager, IxBrowserError
 from modules.config import Settings, load_settings
 from modules.excel_store import (
@@ -88,9 +88,11 @@ def handle_wallet(
             钱包地址=result.address,
             助记词=result.mnemonic,
             钱包密码=result.password,
-            备注="",
+            备注=result.note or "",
         )
         log.info("  钱包完成: %s", result.address)
+        if result.note:
+            log.warning("  钱包提示: %s", result.note)
     elif result.status == "manual":
         store.update(
             row,
@@ -171,7 +173,8 @@ def process_profile(
     stats: Dict[str, int],
     stop_event: Optional[threading.Event] = None,
     base_dir: str = ".",
-) -> None:
+) -> bool:
+    """处理一个窗口，返回 True 表示窗口打开/连接失败（可被重试）。"""
     profile_id = profile["id"]
     profile_name = profile["name"]
     label = profile_name or profile_id
@@ -189,16 +192,17 @@ def process_profile(
         stats["window_error"] += 1
         log.error("  打开/连接窗口失败: %s", exc)
         bm.stop_playwright()
-        return
+        return True
 
     tried = 0
+    auth_backup: list = []
     try:
         if settings.randomize.warm_before_login:
             _pre_login_browse(context, settings, stop_event)
         while pending and tried < settings.twitter.max_tokens_per_profile:
             if stop_event is not None and stop_event.is_set():
                 log.warning("  收到停止信号，结束当前窗口")
-                return
+                return False
             row = pending[0]
             tried += 1
             record_label = row.idx or str(row.sheet_row)
@@ -212,6 +216,9 @@ def process_profile(
             # ============ 第一步：token 登录 ============
             token_result = None
             if row.token:
+                # 注入 token 会清空窗口 cookie，先备份原有登录态，失败时恢复
+                if not auth_backup:
+                    auth_backup = tw_login.snapshot_auth_cookies(context)
                 log.info("    尝试 token %s", mask(row.token))
                 attempt = 0
                 while True:
@@ -262,7 +269,7 @@ def process_profile(
                 stats["ok"] += 1
                 stats["token_ok"] += 1
                 _after_login(browser, context, settings, store, row, label)
-                return
+                return False
 
             if token_status != TOKEN_UNKNOWN:
                 log.warning("    token 登录失败: %s", token_result.detail)
@@ -308,7 +315,7 @@ def process_profile(
                     stats["ok"] += 1
                     stats["pwd_ok"] += 1
                     _after_login(browser, context, settings, store, row, label)
-                    return
+                    return False
 
                 log.warning("    账号密码登录失败: %s", password_result.detail)
             else:
@@ -341,10 +348,12 @@ def process_profile(
             elif status == STATUS_ERROR:
                 stats["error"] += 1
                 log.error("  网络/页面异常，放弃当前窗口: %s", note)
-                return
+                return False
             else:
                 stats["fail"] += 1
                 log.warning("  全部登录方式失败，换下一条: %s", note)
+                if auth_backup and tw_login.restore_auth_cookies(context, auth_backup):
+                    log.info("  已恢复窗口原有登录态")
             human_delay(settings, stop_event)
     finally:
         bm.stop_playwright()
@@ -354,6 +363,7 @@ def process_profile(
                 log.info("  窗口已关闭")
             except Exception:
                 pass
+    return False
 
 
 def _final_status(token_result, password_result) -> str:
@@ -419,6 +429,14 @@ def run(
 ) -> int:
     """核心流程：CLI 和 GUI 都调用这个函数。返回 0 成功 / 非 0 失败。"""
     setup_logging(settings, gui_queue)
+
+    try:
+        ext_ready, ext_info = ext_install.extension_ready(
+            settings.wallet.extension_path, base_dir=base_dir
+        )
+        log.info("MetaMask 扩展: %s", ext_info if ext_ready else "未就绪（本次不自动加载）")
+    except Exception:
+        pass
 
     try:
         store = ExcelStore(settings.excel)
@@ -490,8 +508,18 @@ def run(
         "error": 0,
         "window_error": 0,
     }
+    total = len(pending)
+
+    def _emit_progress() -> None:
+        payload = dict(stats)
+        payload["done"] = total - len(pending)
+        payload["total"] = total
+        emit_stats(gui_queue, payload)
+
+    _emit_progress()
     started = time.time()
     batch_done = 0
+    failed_profiles: List[Dict[str, str]] = []
     try:
         for index, profile in enumerate(profiles):
             if stop_event is not None and stop_event.is_set():
@@ -512,8 +540,11 @@ def run(
                     if not _sleep(gap, stop_event):
                         break
 
-            process_profile(bm, profile, pending, settings, store, db, stats, stop_event, base_dir)
+            if process_profile(bm, profile, pending, settings, store, db, stats,
+                               stop_event, base_dir):
+                failed_profiles.append(profile)
             batch_done += 1
+            _emit_progress()
 
             # 每处理 N 个窗口后长休息，模拟真人分批操作
             if (
@@ -536,6 +567,22 @@ def run(
     except KeyboardInterrupt:
         log.warning("收到中断，正在保存 ...")
     finally:
+        store.save()
+
+    # 打开失败的窗口重试一轮（仅一次），避免偶发失败漏掉账号
+    if failed_profiles and pending and (stop_event is None or not stop_event.is_set()):
+        log.info("有 %d 个窗口打开失败，重试一轮 ...", len(failed_profiles))
+        for profile in failed_profiles:
+            if not pending or (stop_event is not None and stop_event.is_set()):
+                break
+            if process_profile(bm, profile, pending, settings, store, db, stats,
+                               stop_event, base_dir):
+                log.warning("  重试仍失败: %s (%s)",
+                            profile["name"] or "(未命名)", profile["id"])
+            else:
+                # 重试成功，之前记录的窗口失败不再计数
+                stats["window_error"] = max(0, stats["window_error"] - 1)
+            _emit_progress()
         store.save()
 
     elapsed = int(time.time() - started)

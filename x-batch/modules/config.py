@@ -26,6 +26,9 @@ class ExcelCfg:
     password_column: str = "密码"
     twofa_column: str = "2FA"
     backup: bool = True
+    row_start: int = 0            # 只处理 >= 该行号的记录（0 = 不限）
+    row_end: int = 0              # 只处理 <= 该行号的记录（0 = 不限）
+    retry_failed_only: bool = False  # 仅重跑上次失败/受限/异常行
 
 
 @dataclass

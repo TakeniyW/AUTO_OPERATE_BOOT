@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 from urllib.parse import quote
 
 from . import humanize, tw_login
-from .applog import setup_logging
+from .applog import emit_stats, setup_logging
 from .browser import BrowserManager
 from .config import Settings, WarmupCfg
 from .excel_store import (
@@ -553,13 +553,15 @@ def run(
         return 1
 
     # 候选：已登录 / 未使用，且 token 或已绑定窗口
+    session_only = (cfg.login_mode or "auto").strip().lower() == "session"
     candidates: List[AccountRow] = []
     for row in store.rows:
         if row.status == STATUS_RESTRICTED:
             continue
         if row.status not in ("", STATUS_LOGINED, STATUS_UNUSED):
             continue
-        if not row.token and not store.value_of(row, COL_PROFILE_ID):
+        # session 模式只用窗口已有登录态，不要求 token 或绑定窗口
+        if not session_only and not row.token and not store.value_of(row, COL_PROFILE_ID):
             continue
         if db.warmup_count_today(_account_key(row)) >= max(1, cfg.daily_per_account):
             continue
@@ -606,6 +608,18 @@ def run(
     total = {"ok": 0, "skip": 0, "actions": 0, "likes": 0, "retweets": 0, "follows": 0}
     started = time.time()
 
+    def _emit_progress(done: int) -> None:
+        emit_stats(gui_queue, {
+            "warm_ok": total["ok"],
+            "warm_likes": total["likes"],
+            "warm_retweets": total["retweets"],
+            "warm_follows": total["follows"],
+            "done": done,
+            "total": len(candidates),
+        })
+
+    _emit_progress(0)
+
     for index, row in enumerate(candidates):
         if stop_event is not None and stop_event.is_set():
             log.warning("收到停止信号，保存后退出 ...")
@@ -641,6 +655,7 @@ def run(
             total["likes"] += stats.likes
             total["retweets"] += stats.retweets
             total["follows"] += stats.follows
+        _emit_progress(index + 1)
 
         if index < len(candidates) - 1 and (
             stop_event is None or not stop_event.is_set()

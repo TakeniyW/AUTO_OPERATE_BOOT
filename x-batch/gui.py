@@ -5,8 +5,10 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -17,10 +19,13 @@ from pathlib import Path
 from queue import Empty
 from tkinter import filedialog, messagebox, ttk
 
-APP_TITLE = "x-batch v1.4.2 · ixBrowser 批量推特登录 + 钱包初始化 + 养号"
+APP_TITLE = "x-batch v1.4.3 · ixBrowser 批量推特登录 + 钱包初始化 + 养号"
 
 _WORKDIR = Path(__file__).parent.resolve()
 _STARTUP_LOG = _WORKDIR / "startup_error.log"
+
+# 与 modules/applog.STATS_PREFIX 保持一致：GUI 拦截该前缀的结构化统计消息
+STATS_PREFIX = "@@STATS "
 
 # 真正的对象在 main() 里通过 _load_core() 注入：
 # 这样缺依赖时能弹窗说明原因，而不是双击后窗口一闪而过。
@@ -95,6 +100,9 @@ class App(tk.Tk):
 
         self._settings = load_settings(str(self._config_path))
         self._is_running = False
+        self._rec_rows: list = []
+        self._db = None
+        self._db_path = ""
 
         self._build_widgets()
         self._load_settings_to_ui()
@@ -117,8 +125,10 @@ class App(tk.Tk):
         self._start_btn.pack(side=tk.RIGHT)
         self._stop_btn = ttk.Button(top, text="■ 停止", width=10, command=self._on_stop, state=tk.DISABLED)
         self._stop_btn.pack(side=tk.RIGHT, padx=(0, 8))
-        ttk.Button(top, text="保存配置", command=self._on_save_cfg).pack(side=tk.RIGHT, padx=(0, 8))
-        ttk.Button(top, text="加载配置", command=self._on_load_cfg).pack(side=tk.RIGHT, padx=(0, 8))
+        self._save_cfg_btn = ttk.Button(top, text="保存配置", command=self._on_save_cfg)
+        self._save_cfg_btn.pack(side=tk.RIGHT, padx=(0, 8))
+        self._load_cfg_btn = ttk.Button(top, text="加载配置", command=self._on_load_cfg)
+        self._load_cfg_btn.pack(side=tk.RIGHT, padx=(0, 8))
 
         # 主体：参数 Notebook (左 50%) + 日志/统计 (右 50%)
         body = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
@@ -174,6 +184,19 @@ class App(tk.Tk):
             ttk.Label(row, textvariable=var, foreground="#2980b9", font=("", 12, "bold")).pack(side=tk.LEFT)
             self._stat_vars[key] = var
 
+        prog_row = ttk.Frame(stats_frame)
+        prog_row.pack(fill=tk.X, pady=(6, 0))
+        self._progress_var = tk.StringVar(value="进度 0/0")
+        ttk.Label(prog_row, textvariable=self._progress_var, width=14).pack(side=tk.LEFT)
+        self._progress_bar = ttk.Progressbar(prog_row, mode="determinate", maximum=1, value=0)
+        self._progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+
+        action_row = ttk.Frame(right)
+        action_row.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(action_row, text="打开结果表", command=self._open_result_table).pack(side=tk.LEFT)
+        ttk.Button(action_row, text="日志目录", command=self._open_log_dir).pack(side=tk.LEFT, padx=6)
+        ttk.Button(action_row, text="截图目录", command=self._open_screenshot_dir).pack(side=tk.LEFT)
+
         log_frame = ttk.LabelFrame(right, text="运行日志", padding=6)
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         self._log_text = tk.Text(log_frame, wrap="word", height=18, state=tk.DISABLED,
@@ -224,13 +247,36 @@ class App(tk.Tk):
             row=6, column=0, columnspan=3, sticky="w", pady=(2, 0)
         )
 
-        self._backup_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(f, text="首次运行前备份原表 (.bak)", variable=self._backup_var).grid(
-            row=7, column=0, columnspan=3, sticky="w", pady=4
+        ttk.Label(f, text="工作表名(可空)").grid(row=7, column=0, sticky="w", pady=4)
+        self._sheet_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self._sheet_var).grid(row=7, column=1, sticky="ew", pady=4, padx=4)
+        ttk.Label(f, text="(留空=第一个)", foreground="#7f8c8d").grid(row=7, column=2, sticky="w", pady=4)
+
+        ttk.Label(f, text="行号范围").grid(row=8, column=0, sticky="w", pady=4)
+        row_range = ttk.Frame(f)
+        row_range.grid(row=8, column=1, sticky="w", pady=4, padx=4)
+        self._excel_row_start_var = tk.StringVar(value="0")
+        self._excel_row_end_var = tk.StringVar(value="0")
+        ttk.Entry(row_range, textvariable=self._excel_row_start_var, width=8).pack(side=tk.LEFT)
+        ttk.Label(row_range, text="~").pack(side=tk.LEFT, padx=4)
+        ttk.Entry(row_range, textvariable=self._excel_row_end_var, width=8).pack(side=tk.LEFT)
+        ttk.Label(f, text="(Excel 行号；0=不限)", foreground="#7f8c8d").grid(
+            row=8, column=2, sticky="w", pady=4
         )
 
+        opts_row = ttk.Frame(f)
+        opts_row.grid(row=9, column=0, columnspan=3, sticky="w", pady=4)
+        self._backup_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            opts_row, text="首次运行前备份原表 (.bak)", variable=self._backup_var
+        ).pack(side=tk.LEFT)
+        self._excel_retry_failed_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opts_row, text="仅重跑失败/受限/异常行", variable=self._excel_retry_failed_var
+        ).pack(side=tk.LEFT, padx=(12, 0))
+
         dl_row = ttk.Frame(f)
-        dl_row.grid(row=8, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        dl_row.grid(row=10, column=0, columnspan=3, sticky="w", pady=(6, 0))
         ttk.Button(
             dl_row, text="⬇ 下载登录模版", command=self._on_download_template
         ).pack(side=tk.LEFT)
@@ -238,15 +284,20 @@ class App(tk.Tk):
             dl_row, text="⬇ 下载执行结果 Excel", command=self._on_download_result
         )
         self._download_result_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self._reset_failed_btn = ttk.Button(
+            dl_row, text="↺ 重置失败行", command=self._on_reset_failed
+        )
+        self._reset_failed_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         ttk.Label(
             f,
             text="提示: 只跑 token 时表里只需 token 一列；启用账号密码登录后还需 账号 / 密码 / 2FA。\n"
-                 "「下载登录模版」生成标准表头；「下载执行结果 Excel」会另存副本，不改动原表。",
+                 "「下载登录模版」生成标准表头；「下载执行结果 Excel」会另存副本，不改动原表。\n"
+                 "「重置失败行」会清空失败/受限/异常行的状态列，便于下次重跑；原始 token 不受影响。",
             foreground="#7f8c8d",
-            wraplength=420,
+            wraplength=440,
             justify="left",
-        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ).grid(row=11, column=0, columnspan=3, sticky="w", pady=(10, 0))
         return f
 
     def _build_ix_tab(self, parent: ttk.Widget) -> ttk.Frame:
@@ -691,6 +742,19 @@ class App(tk.Tk):
 
         ttk.Button(top, text="查询", command=self._refresh_records).pack(side=tk.LEFT, padx=4)
 
+        date_row = ttk.Frame(f)
+        date_row.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(date_row, text="日期范围").pack(side=tk.LEFT)
+        self._rec_from_var = tk.StringVar()
+        ttk.Entry(date_row, textvariable=self._rec_from_var, width=12).pack(side=tk.LEFT, padx=4)
+        ttk.Label(date_row, text="~").pack(side=tk.LEFT)
+        self._rec_to_var = tk.StringVar()
+        ttk.Entry(date_row, textvariable=self._rec_to_var, width=12).pack(side=tk.LEFT, padx=4)
+        ttk.Label(date_row, text="(YYYY-MM-DD，可空)", foreground="#7f8c8d").pack(side=tk.LEFT, padx=4)
+        ttk.Button(date_row, text="导出 Excel", command=self._on_export_records).pack(
+            side=tk.LEFT, padx=(12, 0)
+        )
+
         self._rec_summary_var = tk.StringVar(value="暂无记录")
         ttk.Label(f, textvariable=self._rec_summary_var, foreground="#7f8c8d").pack(
             anchor="w", pady=(8, 4)
@@ -739,18 +803,23 @@ class App(tk.Tk):
         self._rec_tree.tag_configure("ok", foreground="#1e8449")
         self._rec_tree.tag_configure("fail", foreground="#c0392b")
         self._rec_tree.tag_configure("warn", foreground="#b9770e")
+        self._rec_tree.bind("<Double-1>", self._on_record_open)
         return f
 
     # --------------------------------------------------- 设置 <-> UI
     def _load_settings_to_ui(self) -> None:
         s = self._settings
         self._excel_var.set(str(Path(s.excel.path)))
+        self._sheet_var.set(s.excel.sheet)
         self._token_col_var.set(s.excel.token_column)
         self._ct0_col_var.set(s.excel.ct0_column)
         self._user_col_var.set(s.excel.username_column)
         self._pwd_col_var.set(s.excel.password_column)
         self._twofa_col_var.set(s.excel.twofa_column)
         self._backup_var.set(s.excel.backup)
+        self._excel_row_start_var.set(str(s.excel.row_start))
+        self._excel_row_end_var.set(str(s.excel.row_end))
+        self._excel_retry_failed_var.set(s.excel.retry_failed_only)
 
         self._ix_host_var.set(s.ixbrowser.host)
         self._ix_port_var.set(str(s.ixbrowser.port))
@@ -844,29 +913,41 @@ class App(tk.Tk):
             except Exception:
                 return default
 
+        def _pct(var: tk.StringVar, default: float) -> float:
+            """把界面上的百分比（0~100）转换成 0~1 的概率并夹紧。"""
+            return min(1.0, max(0.0, _float(var, default) / 100.0))
+
         s.excel.path = self._excel_var.get().strip() or "accounts.xlsx"
+        s.excel.sheet = self._sheet_var.get().strip()
         s.excel.token_column = self._token_col_var.get().strip() or "auth_token"
         s.excel.ct0_column = self._ct0_col_var.get().strip()
         s.excel.username_column = self._user_col_var.get().strip() or "账号"
         s.excel.password_column = self._pwd_col_var.get().strip() or "密码"
         s.excel.twofa_column = self._twofa_col_var.get().strip() or "2FA"
         s.excel.backup = bool(self._backup_var.get())
+        s.excel.row_start = max(0, _int(self._excel_row_start_var, 0))
+        s.excel.row_end = max(0, _int(self._excel_row_end_var, 0))
+        s.excel.retry_failed_only = bool(self._excel_retry_failed_var.get())
 
         s.ixbrowser.host = self._ix_host_var.get().strip() or "127.0.0.1"
         s.ixbrowser.port = _int(self._ix_port_var, 53200)
         s.ixbrowser.profile_name_filter = self._ix_filter_var.get().strip()
-        s.ixbrowser.profile_limit = _int(self._ix_limit_var, 1)
+        s.ixbrowser.profile_limit = max(0, _int(self._ix_limit_var, 1))
         s.ixbrowser.profile_start = max(1, _int(self._ix_start_var, 1))
-        s.ixbrowser.profile_end = max(0, _int(self._ix_end_var, 0))
+        end_value = max(0, _int(self._ix_end_var, 0))
+        # 指定结束序号时不能小于起始序号
+        if end_value > 0 and end_value < s.ixbrowser.profile_start:
+            end_value = s.ixbrowser.profile_start
+        s.ixbrowser.profile_end = end_value
         s.ixbrowser.keep_window_open = bool(self._keep_open_var.get())
 
-        s.twitter.login_timeout = _int(self._tw_timeout_var, 25)
-        s.twitter.max_tokens_per_profile = _int(self._tw_max_var, 20)
-        s.twitter.retry_per_token = _int(self._tw_retry_var, 1)
-        s.twitter.delay_min = _float(self._tw_delay_min_var, 3.0)
-        s.twitter.delay_max = _float(self._tw_delay_max_var, 6.0)
+        s.twitter.login_timeout = max(5, _int(self._tw_timeout_var, 25))
+        s.twitter.max_tokens_per_profile = max(1, _int(self._tw_max_var, 20))
+        s.twitter.retry_per_token = max(0, _int(self._tw_retry_var, 1))
+        s.twitter.delay_min = max(0.0, _float(self._tw_delay_min_var, 3.0))
+        s.twitter.delay_max = max(0.0, _float(self._tw_delay_max_var, 6.0))
         s.twitter.password_login = bool(self._tw_pwd_login_var.get())
-        s.twitter.password_timeout = _int(self._tw_pwd_timeout_var, 40)
+        s.twitter.password_timeout = max(10, _int(self._tw_pwd_timeout_var, 40))
 
         s.wallet.enabled = bool(self._wallet_enabled_var.get())
         s.wallet.mode = self._wallet_mode_var.get().strip() or "auto"
@@ -874,16 +955,18 @@ class App(tk.Tk):
         s.wallet.auto_load_extension = bool(self._wallet_autoload_var.get())
         s.wallet.extension_path = self._wallet_extpath_var.get().strip() or "extensions/metamask"
         s.wallet.password_prefix = self._wallet_pfx_var.get().strip() or "Wx"
-        s.wallet.password_length = _int(self._wallet_plen_var, 14)
+        s.wallet.password_length = max(
+            len(s.wallet.password_prefix) + 5, _int(self._wallet_plen_var, 14)
+        )
         s.wallet.manual_fallback = bool(self._wallet_fallback_var.get())
 
         s.randomize.shuffle_rows = bool(self._rnd_shuffle_rows_var.get())
         s.randomize.shuffle_profiles = bool(self._rnd_shuffle_profiles_var.get())
-        s.randomize.account_delay_min = _float(self._rnd_gap_min_var, 20.0)
-        s.randomize.account_delay_max = _float(self._rnd_gap_max_var, 90.0)
+        s.randomize.account_delay_min = max(0.0, _float(self._rnd_gap_min_var, 20.0))
+        s.randomize.account_delay_max = max(0.0, _float(self._rnd_gap_max_var, 90.0))
         s.randomize.batch_size = max(0, _int(self._rnd_batch_var, 0))
-        s.randomize.batch_rest_min = _float(self._rnd_rest_min_var, 300.0)
-        s.randomize.batch_rest_max = _float(self._rnd_rest_max_var, 900.0)
+        s.randomize.batch_rest_min = max(0.0, _float(self._rnd_rest_min_var, 300.0))
+        s.randomize.batch_rest_max = max(0.0, _float(self._rnd_rest_max_var, 900.0))
         s.randomize.daily_limit = max(0, _int(self._rnd_limit_var, 0))
         s.randomize.warm_before_login = bool(self._rnd_warm_var.get())
         s.randomize.warm_seconds_min = max(1, _int(self._rnd_warm_min_var, 5))
@@ -896,18 +979,18 @@ class App(tk.Tk):
         w.session_max = max(w.session_min, _int(self._wm_session_max_var, 300))
         w.accounts_per_run = max(0, _int(self._wm_accounts_var, 0))
         w.daily_per_account = max(1, _int(self._wm_daily_var, 1))
-        w.scroll_min = _float(self._wm_scroll_min_var, 2.0)
-        w.scroll_max = _float(self._wm_scroll_max_var, 7.0)
+        w.scroll_min = max(0.0, _float(self._wm_scroll_min_var, 2.0))
+        w.scroll_max = max(0.0, _float(self._wm_scroll_max_var, 7.0))
         w.max_scrolls = max(1, _int(self._wm_max_scrolls_var, 20))
-        w.like_prob = max(0.0, _float(self._wm_like_prob_var, 25) / 100.0)
+        w.like_prob = _pct(self._wm_like_prob_var, 25)
         w.max_likes = max(0, _int(self._wm_max_likes_var, 6))
-        w.retweet_prob = max(0.0, _float(self._wm_rt_prob_var, 3) / 100.0)
+        w.retweet_prob = _pct(self._wm_rt_prob_var, 3)
         w.max_retweets = max(0, _int(self._wm_max_rt_var, 2))
-        w.follow_prob = max(0.0, _float(self._wm_follow_prob_var, 4) / 100.0)
+        w.follow_prob = _pct(self._wm_follow_prob_var, 4)
         w.max_follows = max(0, _int(self._wm_max_follow_var, 1))
-        w.video_prob = max(0.0, _float(self._wm_video_prob_var, 12) / 100.0)
-        w.search_prob = max(0.0, _float(self._wm_search_prob_var, 30) / 100.0)
-        w.profile_prob = max(0.0, _float(self._wm_profile_prob_var, 25) / 100.0)
+        w.video_prob = _pct(self._wm_video_prob_var, 12)
+        w.search_prob = _pct(self._wm_search_prob_var, 30)
+        w.profile_prob = _pct(self._wm_profile_prob_var, 25)
         raw_keywords = self._wm_keywords_var.get().replace("，", ",")
         w.keywords = [k.strip() for k in raw_keywords.split(",") if k.strip()]
         w.active_hours = self._wm_hours_var.get().strip()
@@ -991,6 +1074,55 @@ class App(tk.Tk):
         self._append_log(f"[INFO] 执行结果已另存: {source} -> {dest}")
         messagebox.showinfo("已另存", f"结果已保存到:\n{dest}\n\n原表未改动。")
 
+    def _on_reset_failed(self) -> None:
+        """清空失败/受限/异常行的状态列，便于下次重跑。"""
+        if self._is_running:
+            messagebox.showinfo("提示", "任务运行中，请先停止")
+            return
+        s = self._collect_settings()
+        if not Path(s.excel.path).exists():
+            messagebox.showerror("参数错误", f"Excel 不存在:\n{s.excel.path}")
+            return
+        if not messagebox.askyesno(
+            "确认重置",
+            "将清空「全部失败 / 受限 / 异常」行的 状态、最终结果、token登录、账号登录 列。\n"
+            "原始 token / 账号 / 密码不受影响。是否继续？",
+        ):
+            return
+        try:
+            from modules.excel_store import ExcelStore
+
+            store = ExcelStore(s.excel)
+            count = store.reset_failed()
+        except Exception as exc:
+            messagebox.showerror("重置失败", str(exc))
+            return
+        messagebox.showinfo("已完成", f"已重置 {count} 行失败记录")
+        self._refresh_records()
+
+    def _validate_settings(self, s: Settings) -> bool:
+        """开始前的参数校验；不合法时弹窗并返回 False。"""
+        problems = []
+        if s.twitter.delay_min > s.twitter.delay_max:
+            problems.append("Twitter 动作延迟：最小值不能大于最大值")
+        if s.randomize.account_delay_min > s.randomize.account_delay_max:
+            problems.append("随机化：账号间隔最小值不能大于最大值")
+        if s.randomize.batch_rest_min > s.randomize.batch_rest_max:
+            problems.append("随机化：长休息最小值不能大于最大值")
+        if s.randomize.warm_seconds_min > s.randomize.warm_seconds_max:
+            problems.append("随机化：访客浏览时长最小值不能大于最大值")
+        if s.warmup.scroll_min > s.warmup.scroll_max:
+            problems.append("养号：滚动停留最小值不能大于最大值")
+        if s.warmup.session_min > s.warmup.session_max:
+            problems.append("养号：单号停留时长最小值不能大于最大值")
+        min_len = len(s.wallet.password_prefix) + 5
+        if s.wallet.password_length < min_len:
+            problems.append(f"钱包密码总长至少为 前缀长度+5（{min_len}）")
+        if problems:
+            messagebox.showerror("参数错误", "\n".join(problems))
+            return False
+        return True
+
     def _test_ix(self) -> None:
         try:
             s = self._collect_settings()
@@ -1010,6 +1142,9 @@ class App(tk.Tk):
             messagebox.showerror("连接失败", str(exc))
 
     def _on_save_cfg(self) -> None:
+        if self._is_running:
+            messagebox.showinfo("提示", "任务运行中，配置参数已锁定，请先停止再保存")
+            return
         self._save_config(silent=False)
 
     def _save_config(self, silent: bool = False) -> bool:
@@ -1024,12 +1159,16 @@ class App(tk.Tk):
             data = {
                 "excel": {
                     "path": s.excel.path,
+                    "sheet": s.excel.sheet,
                     "token_column": s.excel.token_column,
                     "ct0_column": s.excel.ct0_column,
                     "username_column": s.excel.username_column,
                     "password_column": s.excel.password_column,
                     "twofa_column": s.excel.twofa_column,
                     "backup": s.excel.backup,
+                    "row_start": s.excel.row_start,
+                    "row_end": s.excel.row_end,
+                    "retry_failed_only": s.excel.retry_failed_only,
                 },
                 "ixbrowser": {
                     "host": s.ixbrowser.host, "port": s.ixbrowser.port,
@@ -1051,6 +1190,8 @@ class App(tk.Tk):
                 "wallet": {
                     "enabled": s.wallet.enabled, "mode": s.wallet.mode,
                     "extension_id": s.wallet.extension_id,
+                    "auto_load_extension": s.wallet.auto_load_extension,
+                    "extension_path": s.wallet.extension_path,
                     "password_prefix": s.wallet.password_prefix,
                     "password_length": s.wallet.password_length,
                     "step_timeout": s.wallet.step_timeout,
@@ -1112,6 +1253,9 @@ class App(tk.Tk):
             return False
 
     def _on_load_cfg(self) -> None:
+        if self._is_running:
+            messagebox.showinfo("提示", "任务运行中，请先停止再加载配置")
+            return
         path = filedialog.askopenfilename(
             title="选择配置文件",
             filetypes=[("YAML", "*.yaml *.yml"), ("所有文件", "*.*")],
@@ -1126,20 +1270,31 @@ class App(tk.Tk):
             messagebox.showerror("加载失败", str(exc))
 
     # ----------------------------------------------------------- 记录查询
+    def _get_db(self, path: str):
+        """按路径缓存 StateDB 实例，避免每次查询都新建连接。"""
+        from modules.state_db import StateDB
+
+        resolved = str(Path(path).resolve())
+        if self._db is None or self._db_path != resolved:
+            self._db = StateDB(resolved)
+            self._db_path = resolved
+        return self._db
+
     def _refresh_records(self) -> None:
         try:
-            from modules.state_db import StateDB
-
             s = self._collect_settings()
-            db = StateDB(s.output.state_db)
+            db = self._get_db(s.output.state_db)
             status = self._rec_status_var.get().strip()
             rows = db.query(
                 self._rec_kw_var.get().strip(),
                 "" if status == "全部" else status,
+                date_from=self._rec_from_var.get().strip(),
+                date_to=self._rec_to_var.get().strip(),
             )
         except Exception as exc:
             self._rec_summary_var.set(f"读取记录失败: {exc}")
             return
+        self._rec_rows = rows
 
         for item in self._rec_tree.get_children():
             self._rec_tree.delete(item)
@@ -1175,6 +1330,73 @@ class App(tk.Tk):
             text = "暂无记录"
         self._rec_summary_var.set(text)
 
+    def _on_export_records(self) -> None:
+        """把当前查询结果导出为 Excel。"""
+        if not self._rec_rows:
+            messagebox.showinfo("提示", "当前没有可导出的记录，请先查询")
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出记录",
+            defaultextension=".xlsx",
+            initialfile="记录导出.xlsx",
+            initialdir=str(self._workdir),
+            filetypes=[("Excel", "*.xlsx")],
+        )
+        if not path:
+            return
+        try:
+            from openpyxl import Workbook
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "记录"
+            ws.append(["序号", "账号", "token登录", "账号登录", "最终结果",
+                       "窗口", "更新时间", "备注"])
+            for record in self._rec_rows:
+                ws.append([
+                    record.get("idx") or "",
+                    record.get("account") or "",
+                    record.get("token_status") or "未尝试",
+                    record.get("password_status") or "未尝试",
+                    record.get("final_status") or "未处理",
+                    record.get("profile") or "",
+                    record.get("updated_at") or "",
+                    record.get("note") or "",
+                ])
+            wb.save(path)
+        except Exception as exc:
+            messagebox.showerror("导出失败", str(exc))
+            return
+        messagebox.showinfo("已导出", path)
+
+    def _on_record_open(self, _event=None) -> None:
+        selection = self._rec_tree.selection()
+        if not selection:
+            return
+        values = self._rec_tree.item(selection[0], "values")
+        profile = values[5] if len(values) > 5 else ""
+        self._open_wallet_screenshot(profile)
+
+    def _open_wallet_screenshot(self, profile: str) -> None:
+        """双击记录时打开该窗口最新的钱包失败截图，找不到则打开截图目录。"""
+        s = self._collect_settings()
+        shot_dir = self._resolve_dir(s.output.screenshot_dir)
+        safe = re.sub(r"[^\w\-]+", "_", profile or "")[:40]
+        candidates = []
+        if safe:
+            try:
+                candidates = sorted(
+                    shot_dir.glob(f"wallet_fail_*{safe}*.png"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+            except Exception:
+                candidates = []
+        if candidates:
+            self._open_path(candidates[0])
+            return
+        self._open_path(shot_dir)
+
     # ----------------------------------------------------------- 运行控制
     def _on_start(self) -> None:
         if self._is_running:
@@ -1184,6 +1406,8 @@ class App(tk.Tk):
         # 基础校验
         if not Path(s.excel.path).exists():
             messagebox.showerror("参数错误", f"Excel 不存在:\n{s.excel.path}")
+            return
+        if not self._validate_settings(s):
             return
 
         if not s.wallet.enabled and s.wallet.mode != "skip":
@@ -1221,6 +1445,8 @@ class App(tk.Tk):
             return
         if not s.warmup.enabled:
             messagebox.showerror("参数错误", "养号功能未启用（⑥ 养号页签）")
+            return
+        if not self._validate_settings(s):
             return
         self._launch("warmup", s)
 
@@ -1271,6 +1497,77 @@ class App(tk.Tk):
     def _on_run_finished(self) -> None:
         self._set_running_state(False)
         self._refresh_records()
+        try:
+            self._show_finish_summary()
+        except Exception:
+            pass
+
+    def _show_finish_summary(self) -> None:
+        mode = getattr(self, "_task_mode", "login")
+        if mode == "warmup":
+            lines = [
+                f"养号账号: {self._stat_vars['warm_ok'].get()}",
+                f"点赞: {self._stat_vars['warm_likes'].get()}  "
+                f"转推: {self._stat_vars['warm_retweets'].get()}  "
+                f"关注: {self._stat_vars['warm_follows'].get()}",
+            ]
+        else:
+            lines = [
+                f"登录成功: {self._stat_vars['ok'].get()} "
+                f"（token {self._stat_vars['token_ok'].get()} / "
+                f"密码 {self._stat_vars['pwd_ok'].get()}）",
+                f"全部失败: {self._stat_vars['fail'].get()}    "
+                f"受限: {self._stat_vars['restricted'].get()}    "
+                f"异常: {self._stat_vars['error'].get()}    "
+                f"窗口失败: {self._stat_vars['window_error'].get()}",
+            ]
+        lines.append(self._progress_var.get())
+        messagebox.showinfo("任务结束", "\n".join(lines))
+
+    # ----------------------------------------------------------- 打开目录
+    def _resolve_dir(self, value: str) -> Path:
+        path = Path(value)
+        return path if path.is_absolute() else self._workdir / path
+
+    @staticmethod
+    def _open_path(path: Path) -> None:
+        path = Path(path)
+        if not path.exists():
+            messagebox.showwarning("路径不存在", str(path))
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                import subprocess
+
+                subprocess.Popen(["open", str(path)])
+            else:
+                import subprocess
+
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as exc:
+            messagebox.showerror("打开失败", f"{path}\n{exc}")
+
+    def _open_result_table(self) -> None:
+        configured = self._excel_var.get().strip()
+        if not configured:
+            messagebox.showwarning("提示", "请先选择 token 表路径")
+            return
+        try:
+            from modules.excel_store import resolve_result_path
+
+            path = resolve_result_path(configured)
+        except Exception:
+            messagebox.showwarning("提示", "还没有可打开的结果表")
+            return
+        self._open_path(path)
+
+    def _open_log_dir(self) -> None:
+        self._open_path(self._resolve_dir(self._settings.output.log_dir))
+
+    def _open_screenshot_dir(self) -> None:
+        self._open_path(self._resolve_dir(self._settings.output.screenshot_dir))
 
     def _set_running_state(self, running: bool) -> None:
         self._is_running = running
@@ -1283,6 +1580,9 @@ class App(tk.Tk):
             self._stop_btn.config(state=tk.NORMAL)
             self._warmup_btn.config(state=tk.DISABLED)
             self._download_result_btn.config(state=tk.DISABLED)
+            self._save_cfg_btn.config(state=tk.DISABLED)
+            self._load_cfg_btn.config(state=tk.DISABLED)
+            self._reset_failed_btn.config(state=tk.DISABLED)
         else:
             self._status_dot.config(fg=COLOR_IDLE)
             self._status_label.config(text="空闲")
@@ -1290,6 +1590,9 @@ class App(tk.Tk):
             self._stop_btn.config(state=tk.DISABLED)
             self._warmup_btn.config(state=tk.NORMAL)
             self._download_result_btn.config(state=tk.NORMAL)
+            self._save_cfg_btn.config(state=tk.NORMAL)
+            self._load_cfg_btn.config(state=tk.NORMAL)
+            self._reset_failed_btn.config(state=tk.NORMAL)
 
     # ----------------------------------------------------------- 日志刷新
     def _reset_log(self) -> None:
@@ -1306,55 +1609,49 @@ class App(tk.Tk):
         self._log_text.config(state=tk.DISABLED)
 
     def _drain_log_queue(self) -> None:
-        changed = False
         while True:
             try:
                 msg = self._log_queue.get_nowait()
             except Empty:
                 break
+            if msg.startswith(STATS_PREFIX):
+                try:
+                    self._apply_stats(json.loads(msg[len(STATS_PREFIX):]))
+                except Exception:
+                    pass
+                continue
             self._append_log(msg)
-            changed = True
-
-        if changed:
-            self._refresh_stats()
         self.after(200, self._drain_log_queue)
 
     # ----------------------------------------------------------- 统计
     def _reset_stats(self) -> None:
         for v in self._stat_vars.values():
             v.set("0")
+        try:
+            self._progress_var.set("进度 0/0")
+            self._progress_bar.config(maximum=1, value=0)
+        except Exception:
+            pass
 
-    def _refresh_stats(self) -> None:
-        """从日志反推统计，避免主流程与 GUI 之间再加一套回调。"""
-        import re
-
-        text = self._log_text.get("1.0", tk.END)
-        stats = {k: 0 for k in self._stat_vars}
-        for line in text.splitlines():
-            if "token 登录成功" in line:
-                stats["token_ok"] += 1
-            elif "账号密码登录成功" in line:
-                stats["pwd_ok"] += 1
-            elif "全部登录方式失败" in line:
-                stats["fail"] += 1
-            elif "均不可用（受限）" in line:
-                stats["restricted"] += 1
-            elif "放弃当前窗口" in line:
-                stats["error"] += 1
-            elif "打开/连接窗口失败" in line:
-                stats["window_error"] += 1
-            match = re.search(
-                r"养号结束: 成功 (\d+) / 跳过 \d+，点赞 (\d+) / 转推 (\d+) / 关注 (\d+)",
-                line,
-            )
-            if match:
-                stats["warm_ok"] = int(match.group(1))
-                stats["warm_likes"] = int(match.group(2))
-                stats["warm_retweets"] = int(match.group(3))
-                stats["warm_follows"] = int(match.group(4))
-        stats["ok"] = stats["token_ok"] + stats["pwd_ok"]
-        for key, value in stats.items():
-            self._stat_vars[key].set(str(value))
+    def _apply_stats(self, payload: dict) -> None:
+        """根据主流程推送的结构化统计刷新右侧统计区。"""
+        for key, var in self._stat_vars.items():
+            if key in payload and payload[key] is not None:
+                var.set(str(payload[key]))
+        total = payload.get("total")
+        done = payload.get("done")
+        if total is None or done is None:
+            return
+        try:
+            total_i = max(0, int(total))
+            done_i = max(0, int(done))
+        except (TypeError, ValueError):
+            return
+        self._progress_var.set(f"进度 {done_i}/{total_i}")
+        try:
+            self._progress_bar.config(maximum=max(1, total_i), value=min(done_i, total_i))
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ 关闭
     def _on_close(self) -> None:

@@ -6,6 +6,7 @@ import re
 import secrets
 import string
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -54,10 +55,12 @@ class WalletResult:
 # ---------------------------------------------------------------- 生成钱包
 def make_password(prefix: str, length: int) -> str:
     alphabet = string.ascii_letters + string.digits
-    body_len = max(4, length - len(prefix) - 4)
+    suffix = "!aA9"  # 符号/小写/大写/数字各一，保证四类字符齐全
+    # 目标长度至少容纳 前缀 + 4 位固定后缀，且严格等于目标
+    target = max(len(prefix) + len(suffix), int(length))
+    body_len = target - len(prefix) - len(suffix)
     body = "".join(secrets.choice(alphabet) for _ in range(body_len))
-    # 保证包含大写、小写、数字、符号
-    return f"{prefix}{body}!aA9"
+    return f"{prefix}{body}{suffix}"
 
 
 def generate_wallet(password_prefix: str, password_length: int) -> Tuple[str, str, str]:
@@ -281,9 +284,27 @@ def _take_screenshot(page: Optional[Page], directory: str, label: str) -> None:
         path = Path(directory)
         path.mkdir(parents=True, exist_ok=True)
         safe = re.sub(r"[^\w\-]+", "_", label)[:40]
-        page.screenshot(path=str(path / f"wallet_fail_{safe}.png"))
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        page.screenshot(path=str(path / f"wallet_fail_{safe}_{stamp}.png"))
     except Exception:
         pass
+
+
+def _verify_address(page: Optional[Page], address: str) -> bool:
+    """在钱包页面文本里确认地址已出现（完整地址或 0x123456...abcd 缩写）。"""
+    if page is None or not address:
+        return False
+    digits = address[2:] if address.lower().startswith("0x") else address
+    short = f"0x{digits[:6]}...{digits[-4:]}" if len(digits) >= 10 else ""
+    try:
+        body = (page.inner_text("body", timeout=1500) or "").lower()
+    except Exception:
+        return False
+    if address.lower() in body:
+        return True
+    if short and short.lower() in body:
+        return True
+    return False
 
 
 # ------------------------------------------------------------------ 对外入口
@@ -323,12 +344,17 @@ def ensure_wallet(
         context, extension_id, mnemonic, password, cfg.step_timeout
     )
     if ok:
+        verified = _verify_address(page, address)
         try:
             page.close()  # type: ignore[union-attr]
         except Exception:
             pass
         return WalletResult(
-            "ok", address=address, mnemonic=mnemonic, password=password
+            "ok",
+            address=address,
+            mnemonic=mnemonic,
+            password=password,
+            note="" if verified else "地址未在页面确认",
         )
 
     if detail == "该窗口已存在钱包":

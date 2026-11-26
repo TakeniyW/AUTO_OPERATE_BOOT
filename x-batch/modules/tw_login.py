@@ -38,6 +38,32 @@ def _clear_auth_cookies(context: BrowserContext) -> None:
             pass
 
 
+AUTH_COOKIE_NAMES = ("auth_token", "ct0", "twid")
+
+
+def snapshot_auth_cookies(context: BrowserContext) -> list[dict]:
+    """备份窗口里现有的登录相关 cookie，便于登录失败时恢复原有登录态。"""
+    try:
+        cookies = context.cookies("https://x.com")
+    except Exception:
+        return []
+    return [
+        c for c in cookies
+        if c.get("name") in AUTH_COOKIE_NAMES and c.get("value")
+    ]
+
+
+def restore_auth_cookies(context: BrowserContext, snapshot: list[dict]) -> bool:
+    """把备份的 cookie 写回窗口；成功返回 True。"""
+    if not snapshot:
+        return False
+    try:
+        context.add_cookies(snapshot)
+        return True
+    except Exception:
+        return False
+
+
 def _build_cookies(token: str, ct0: str) -> list[dict]:
     expires = int(time.time()) + 2 * 365 * 24 * 3600
     cookies = [
@@ -179,6 +205,11 @@ def login_with_token(
             return LoginResult(OK, username=username, detail="已登录")
 
         if state == INVALID:
+            # 刚注入 cookie 时页面可能仍在向登录页跳转；若 auth cookie 仍在且
+            # 注入未满 4 秒，继续等待而不是立刻判失效，避免误判
+            if time.time() - started < 4 and _has_auth_cookie(context):
+                time.sleep(1.0)
+                continue
             return LoginResult(INVALID, detail="被重定向到登录页")
 
         if state == RESTRICTED:
@@ -352,6 +383,7 @@ def login_with_password(
 
     # ---------------- 第四步：等结果 / 处理 2FA
     code_tries = 0
+    last_code = ""
     while time.time() < deadline:
         state = _probe(page)
         if state == OK:
@@ -374,6 +406,18 @@ def login_with_password(
                 code = str(code_getter()).strip()
             except Exception as exc:
                 return LoginResult(ERROR, detail=f"获取 2FA 验证码失败: {exc}")
+            if code and code == last_code:
+                # TOTP 30 秒内会生成同一个码，重复提交必然被判无效；
+                # 等到下一个周期边界后再重新取码
+                wait = 30 - (time.time() % 30) + 1
+                log.info("  2FA 验证码未刷新，等待 %d 秒后重新取码", int(wait))
+                time.sleep(wait)
+                deadline = max(deadline, time.time() + 10)
+                try:
+                    code = str(code_getter()).strip()
+                except Exception as exc:
+                    return LoginResult(ERROR, detail=f"获取 2FA 验证码失败: {exc}")
+            last_code = code
             log.info("  输入 2FA 验证码: %s", code)
             try:
                 code_input.fill(code)

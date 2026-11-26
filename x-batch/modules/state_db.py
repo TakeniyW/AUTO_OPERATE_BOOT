@@ -9,6 +9,7 @@ GUI 的“记录查询”页签直接读这个库，不依赖 Excel 是否被占
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
@@ -33,11 +34,22 @@ class StateDB:
     def __init__(self, path: str):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # 每个线程复用自己的连接，避免多线程共用一个 sqlite 连接
+        self._local = threading.local()
         self._init()
 
     def _connect(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            return conn
         conn = sqlite3.connect(self.path, timeout=15)
         conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=15000")
+        except Exception:
+            pass
+        self._local.conn = conn
         return conn
 
     def _init(self) -> None:
@@ -102,7 +114,13 @@ class StateDB:
                     (sheet_row, *data.values()),
                 )
 
-    def query(self, keyword: str = "", status: str = "") -> List[Dict[str, str]]:
+    def query(
+        self,
+        keyword: str = "",
+        status: str = "",
+        date_from: str = "",
+        date_to: str = "",
+    ) -> List[Dict[str, str]]:
         sql = "SELECT * FROM records"
         conditions: List[str] = []
         args: List[str] = []
@@ -116,6 +134,14 @@ class StateDB:
         if status:
             conditions.append("final_status = ?")
             args.append(status)
+        date_from = (date_from or "").strip()
+        date_to = (date_to or "").strip()
+        if date_from:
+            conditions.append("updated_at >= ?")
+            args.append(f"{date_from} 00:00:00")
+        if date_to:
+            conditions.append("updated_at <= ?")
+            args.append(f"{date_to} 23:59:59")
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY sheet_row"

@@ -93,6 +93,10 @@ class BrowserManager:
         except TypeError:
             # 老版本 SDK 不接受 startup_args，降级为不注入
             if startup_args:
+                log.warning(
+                    "当前 ixbrowser-local-api 版本不支持 startup_args，"
+                    "已跳过 MetaMask 自动加载（请升级 SDK 或在窗口内手动安装扩展）"
+                )
                 data = self._client.open_profile(
                     pid, cookies_backup=False, load_profile_info_page=False
                 )

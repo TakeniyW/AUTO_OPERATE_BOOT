@@ -1,6 +1,7 @@
 """日志初始化：控制台 + 文件 + 可选的 GUI 队列。"""
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import time
@@ -9,6 +10,19 @@ from queue import Queue
 from typing import Optional
 
 from .config import Settings
+
+# GUI 队列里的结构化统计消息前缀：GUI 拦截前缀后不写日志，直接刷新统计区
+STATS_PREFIX = "@@STATS "
+
+
+def emit_stats(queue: Optional[Queue], payload: dict) -> None:
+    """把结构化统计写入 GUI 队列（仅 GUI 模式传入 queue 时有效）。"""
+    if queue is None:
+        return
+    try:
+        queue.put(STATS_PREFIX + json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        pass
 
 
 class QueueLogHandler(logging.Handler):

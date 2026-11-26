@@ -58,6 +58,11 @@ wallet:
   mode: "auto"
   # MetaMask 扩展 ID，留空自动探测
   extension_id: ""
+  # 开窗口时用 --load-extension 自动加载本地扩展（无需逐个窗口手动安装）
+  # 首次使用请在 GUI「钱包」页签点「下载/安装 MetaMask」，或运行 install_metamask.bat
+  auto_load_extension: true
+  # 解压后的扩展目录（含 manifest.json），相对路径基于 x-batch 目录
+  extension_path: "extensions/metamask"
   password_prefix: "Wx"
   password_length: 14
   # 每一步 UI 操作的等待时间（秒）

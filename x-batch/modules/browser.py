@@ -76,12 +76,28 @@ class BrowserManager:
         text = str(profile_id).strip()
         return int(text) if text.isdigit() else profile_id
 
-    def open(self, profile_id: str) -> str:
-        """打开窗口，返回 http://ip:port 形式的 CDP 地址。"""
+    def open(self, profile_id: str, startup_args: Optional[List[str]] = None) -> str:
+        """打开窗口，返回 http://ip:port 形式的 CDP 地址。
+
+        startup_args: 额外的 Chrome 启动参数（如 --load-extension=...），
+        仅在本地 SDK 支持时透传；不支持的旧版本会自动忽略。
+        """
         pid = self._pid(profile_id)
-        data = self._client.open_profile(
-            pid, cookies_backup=False, load_profile_info_page=False
+        kwargs: Dict[str, Any] = dict(
+            cookies_backup=False, load_profile_info_page=False
         )
+        if startup_args:
+            kwargs["startup_args"] = startup_args
+        try:
+            data = self._client.open_profile(pid, **kwargs)
+        except TypeError:
+            # 老版本 SDK 不接受 startup_args，降级为不注入
+            if startup_args:
+                data = self._client.open_profile(
+                    pid, cookies_backup=False, load_profile_info_page=False
+                )
+            else:
+                raise
         if data is None:
             raise IxBrowserError(
                 f"打开窗口 {profile_id} 失败: code={self._client.code} "

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import queue
 import sys
 import threading
@@ -16,7 +17,7 @@ from pathlib import Path
 from queue import Empty
 from tkinter import filedialog, messagebox, ttk
 
-APP_TITLE = "x-batch v1.4.0 · ixBrowser 批量推特登录 + 钱包初始化 + 养号"
+APP_TITLE = "x-batch v1.4.1 · ixBrowser 批量推特登录 + 钱包初始化 + 养号"
 
 _WORKDIR = Path(__file__).parent.resolve()
 _STARTUP_LOG = _WORKDIR / "startup_error.log"
@@ -367,11 +368,105 @@ class App(tk.Tk):
             row=5, column=0, columnspan=3, sticky="w", pady=4
         )
 
-        ttk.Label(f, text="提示: 脚本会先在 Python 本地生成 12 词助记词并离线派生地址，再自动点 MetaMask 完成导入。",
-                  foreground="#7f8c8d", wraplength=380, justify="left").grid(
-            row=6, column=0, columnspan=3, sticky="w", pady=(10, 0)
+        # ---- 自动加载本地扩展（--load-extension） ----
+        sep = ttk.Separator(f, orient="horizontal")
+        sep.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+
+        self._wallet_autoload_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            f,
+            text="开窗口时自动加载本地 MetaMask（--load-extension，无需逐个窗口手动安装）",
+            variable=self._wallet_autoload_var,
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=2)
+
+        ttk.Label(f, text="扩展目录").grid(row=8, column=0, sticky="w", pady=4)
+        self._wallet_extpath_var = tk.StringVar(value="extensions/metamask")
+        path_row = ttk.Frame(f); path_row.grid(row=8, column=1, columnspan=2, sticky="ew", padx=4)
+        path_row.columnconfigure(0, weight=1)
+        ttk.Entry(path_row, textvariable=self._wallet_extpath_var).grid(row=0, column=0, sticky="ew")
+        ttk.Button(path_row, text="选择...", width=8, command=self._pick_extension_dir).grid(
+            row=0, column=1, padx=(4, 0)
         )
+
+        btn_row = ttk.Frame(f); btn_row.grid(row=9, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        ttk.Button(btn_row, text="⬇ 下载 / 安装 MetaMask", command=self._on_install_extension).pack(
+            side=tk.LEFT
+        )
+        self._wallet_ext_status_var = tk.StringVar(value="")
+        ttk.Label(btn_row, textvariable=self._wallet_ext_status_var,
+                  foreground="#7f8c8d").pack(side=tk.LEFT, padx=8)
+
+        ttk.Label(
+            f,
+            text=(
+                "提示: 钱包数据保存在每个 ixBrowser 窗口内；扩展目录不要移动，"
+                "否则各窗口里的钱包会重置。已在 ixBrowser 手动装过 MetaMask 的窗口，"
+                "请关闭「自动加载」以免重复。"
+            ),
+            foreground="#7f8c8d", wraplength=420, justify="left",
+        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(10, 0))
         return f
+
+    def _refresh_extension_status(self) -> None:
+        """根据当前路径显示扩展是否就绪。"""
+        from modules import ext_install
+
+        path = self._wallet_extpath_var.get().strip() or "extensions/metamask"
+        ready, info = ext_install.extension_ready(path, base_dir=str(self._workdir))
+        if not self._wallet_autoload_var.get():
+            self._wallet_ext_status_var.set("自动加载已关闭")
+        elif ready:
+            self._wallet_ext_status_var.set(f"✓ 已就绪：{info}")
+        else:
+            self._wallet_ext_status_var.set("⚠ 未安装，点左侧按钮下载")
+
+    def _pick_extension_dir(self) -> None:
+        cur = self._wallet_extpath_var.get().strip() or "extensions/metamask"
+        p = Path(cur)
+        if not p.is_absolute():
+            p = self._workdir / p
+        initial = str(p) if p.exists() else (str(p.parent) if p.parent.exists() else str(self._workdir))
+        chosen = filedialog.askdirectory(initialdir=initial)
+        if not chosen:
+            return
+        try:
+            rel = os.path.relpath(chosen, self._workdir)
+            self._wallet_extpath_var.set(chosen if rel.startswith("..") else rel)
+        except ValueError:
+            self._wallet_extpath_var.set(chosen)
+        self._refresh_extension_status()
+
+    def _on_install_extension(self) -> None:
+        if self._is_running:
+            messagebox.showinfo("提示", "任务运行中，请先停止")
+            return
+        target = self._wallet_extpath_var.get().strip() or "extensions/metamask"
+        self._wallet_ext_status_var.set("下载中 ...")
+        self._append_log("[INFO] 开始下载 / 安装 MetaMask 扩展 ...")
+
+        def worker() -> None:
+            from modules import ext_install
+
+            def cb(msg: str) -> None:
+                self._log_queue.put(f"[EXT] {msg}")
+
+            ok, info = ext_install.install_metamask(
+                target, base_dir=str(self._workdir), cb=cb
+            )
+            self.after(0, lambda: self._after_install(ok, info))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _after_install(self, ok: bool, info: str) -> None:
+        self._refresh_extension_status()
+        if ok:
+            messagebox.showinfo(
+                "安装完成", f"MetaMask 已就绪：{info}\n\n下次打开窗口会自动加载。"
+            )
+        else:
+            messagebox.showerror(
+                "安装失败", info or "请检查网络，或手动把扩展解压到该目录。"
+            )
 
     def _build_random_tab(self, parent: ttk.Widget) -> ttk.Frame:
         f = ttk.Frame(parent, padding=10)
@@ -665,9 +760,12 @@ class App(tk.Tk):
         self._wallet_enabled_var.set(s.wallet.enabled)
         self._wallet_mode_var.set(s.wallet.mode)
         self._wallet_ext_var.set(s.wallet.extension_id)
+        self._wallet_autoload_var.set(s.wallet.auto_load_extension)
+        self._wallet_extpath_var.set(s.wallet.extension_path or "extensions/metamask")
         self._wallet_pfx_var.set(s.wallet.password_prefix)
         self._wallet_plen_var.set(str(s.wallet.password_length))
         self._wallet_fallback_var.set(s.wallet.manual_fallback)
+        self._refresh_extension_status()
         self._on_pwd_login_toggle()
 
         r = s.randomize
@@ -762,6 +860,8 @@ class App(tk.Tk):
         s.wallet.enabled = bool(self._wallet_enabled_var.get())
         s.wallet.mode = self._wallet_mode_var.get().strip() or "auto"
         s.wallet.extension_id = self._wallet_ext_var.get().strip()
+        s.wallet.auto_load_extension = bool(self._wallet_autoload_var.get())
+        s.wallet.extension_path = self._wallet_extpath_var.get().strip() or "extensions/metamask"
         s.wallet.password_prefix = self._wallet_pfx_var.get().strip() or "Wx"
         s.wallet.password_length = _int(self._wallet_plen_var, 14)
         s.wallet.manual_fallback = bool(self._wallet_fallback_var.get())
@@ -1013,6 +1113,25 @@ class App(tk.Tk):
             # 让 GUI 上 radio 覆盖
             pass
 
+        # 钱包模式下若启用了自动加载但扩展未就绪，提示是否仍要继续
+        if (
+            s.wallet.enabled
+            and s.wallet.mode != "skip"
+            and s.wallet.auto_load_extension
+        ):
+            from modules import ext_install
+
+            ready, _ = ext_install.extension_ready(
+                s.wallet.extension_path, base_dir=str(self._workdir)
+            )
+            if not ready:
+                if not messagebox.askyesno(
+                    "MetaMask 未安装",
+                    "未检测到本地 MetaMask 扩展，本次将无法初始化钱包。\n"
+                    "是否仍要继续（仅登录 Twitter）？",
+                ):
+                    return
+
         self._launch("login", s)
 
     def _on_start_warmup(self) -> None:
@@ -1065,7 +1184,8 @@ class App(tk.Tk):
 
                 warmup_run(s, gui_queue=self._log_queue, stop_event=self._stop_event)
             else:
-                run(s, gui_queue=self._log_queue, stop_event=self._stop_event)
+                run(s, gui_queue=self._log_queue, stop_event=self._stop_event,
+                    base_dir=str(self._workdir))
         except Exception as exc:
             self._log_queue.put(f"[ERROR] 运行异常: {exc}")
         finally:

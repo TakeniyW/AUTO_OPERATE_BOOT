@@ -1,3 +1,12 @@
+x-batch 1.4.1
+build: 2026-11-26
+changes:
+  - 新增 MetaMask 自动加载：开窗口时通过 --load-extension 注入本地扩展，无需在 ixBrowser 逐个窗口手动安装
+  - 新增 modules/ext_install.py：从 Chrome 应用商店 CRX 或 MetaMask GitHub 下载并解压扩展到本地目录
+  - GUI「钱包」页签新增：自动加载开关、扩展目录选择、一键下载/安装 MetaMask 按钮与就绪状态
+  - 新增 install_metamask.bat，可独立运行下载扩展
+  - 扩展未就绪时，启动任务前会提示是否仅登录 Twitter
+
 x-batch 1.4.0
 build: 2026-11-26
 changes:

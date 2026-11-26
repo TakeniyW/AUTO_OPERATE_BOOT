@@ -1,0 +1,18 @@
+# 自动下载的扩展（运行 install_metamask.bat / GUI 下载后生成，体积较大）
+extensions/
+
+# 运行产物
+data/
+logs/
+screenshots/
+startup_error.log
+
+# 用户数据（不入库）
+accounts.xlsx
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# Excel 备份
+*.xlsx.bak

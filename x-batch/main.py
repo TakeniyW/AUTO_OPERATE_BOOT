@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import random
 import threading
 import time
@@ -43,7 +44,7 @@ from modules.excel_store import (
     ExcelStore,
 )
 from modules.state_db import StateDB
-from modules import humanize, tw_login, twofa, wallet
+from modules import ext_install, humanize, tw_login, twofa, wallet
 
 log = logging.getLogger("x-batch")
 
@@ -169,6 +170,7 @@ def process_profile(
     db: StateDB,
     stats: Dict[str, int],
     stop_event: Optional[threading.Event] = None,
+    base_dir: str = ".",
 ) -> None:
     profile_id = profile["id"]
     profile_name = profile["name"]
@@ -177,7 +179,10 @@ def process_profile(
     log.info("=" * 60)
     log.info("打开窗口: %s (%s)", label, profile_id)
     try:
-        debugging = bm.open(profile_id)
+        startup_args = ext_install.extension_load_args(settings.wallet, base_dir=base_dir)
+        if startup_args:
+            log.info("  自动加载 MetaMask: %s", startup_args[0])
+        debugging = bm.open(profile_id, startup_args=startup_args or None)
         time.sleep(1.0)
         browser, context = bm.connect(debugging)
     except Exception as exc:
@@ -410,6 +415,7 @@ def run(
     settings: Settings,
     gui_queue: Optional[Queue] = None,
     stop_event: Optional[threading.Event] = None,
+    base_dir: str = ".",
 ) -> int:
     """核心流程：CLI 和 GUI 都调用这个函数。返回 0 成功 / 非 0 失败。"""
     setup_logging(settings, gui_queue)
@@ -506,7 +512,7 @@ def run(
                     if not _sleep(gap, stop_event):
                         break
 
-            process_profile(bm, profile, pending, settings, store, db, stats, stop_event)
+            process_profile(bm, profile, pending, settings, store, db, stats, stop_event, base_dir)
             batch_done += 1
 
             # 每处理 N 个窗口后长休息，模拟真人分批操作
@@ -569,6 +575,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     settings = load_settings(args.config)
+    base_dir = os.path.dirname(os.path.abspath(args.config)) or "."
     if args.excel:
         settings.excel.path = args.excel
     if args.limit >= 0:
@@ -581,7 +588,7 @@ def main() -> int:
         from modules import warmup
 
         return warmup.run(settings)
-    return run(settings)
+    return run(settings, base_dir=base_dir)
 
 
 if __name__ == "__main__":

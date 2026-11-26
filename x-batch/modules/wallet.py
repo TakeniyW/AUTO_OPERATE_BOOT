@@ -311,7 +311,12 @@ def ensure_wallet(
     extension_id = find_extension_id(browser, context, cfg.extension_id)
     if not extension_id:
         return WalletResult(
-            "failed", note="未检测到 MetaMask 扩展，请先在 ixBrowser 为该窗口安装 MetaMask"
+            "failed",
+            note=(
+                "未检测到 MetaMask 扩展。请在「钱包」页签点「下载/安装 MetaMask」"
+                "（或运行 install_metamask.bat），并开启「自动加载扩展」；"
+                "也可在 ixBrowser 里手动安装后关闭自动加载。"
+            ),
         )
 
     ok, detail, page = import_to_metamask(

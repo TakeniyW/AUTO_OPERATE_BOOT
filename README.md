@@ -11,7 +11,7 @@ ixBrowser 多窗口 × Twitter 批量登录（token 优先 / 账号密码兜底�
 | 批量执行 | 通过 ixBrowser 本地 API 依次打开已建好的窗口（每个窗口独立 IP / 环境），一个窗口处理完再开下一个 |
 | Twitter 登录 | 每条记录先注入 `auth_token` 登录；失败后自动改用「账号 + 密码」登录，需要时自动填入 2FA 验证码 |
 | 结果记录 | 同时写入 Excel（新增状态列）与本地 SQLite（`data/state.db`），GUI 可直接查询每条记录的两种登录结果 |
-| 钱包初始化 | 登录成功后，自动生成 12 词助记词并导入 MetaMask 插件，记录地址 / 助记词 / 钱包密码；可切换为纯人工模式 |
+| 钱包初始化 | 登录成功后，自动生成 12 词助记词并导入 MetaMask，记录地址 / 助记词 / 钱包密码；可切换为纯人工模式；**支持一键下载并自动加载 MetaMask 扩展（`--load-extension`），无需在 ixBrowser 逐个窗口手动安装** |
 | 行为随机化 | 打乱账号 / 窗口顺序、账号间随机等待、分批长休息、限制单次数量、登录前访客浏览，降低批量特征 |
 | 自动养号 | 按账号随机浏览时间线、阅读推文、点赞、转推、收藏、看视频、关注、搜索，可设每日次数与时段 |
 | 图形界面 | 所有运行参数在界面修改，点“开始”自动保存，无需手改配置文件 |
@@ -157,11 +157,13 @@ x-batch/
 ├─ run_gui.bat            # Windows 启动脚本（带控制台，出错可停留查看）
 ├─ run_warmup.bat         # Windows 命令行养号（适合计划任务）
 ├─ install_deps.bat       # 一键安装依赖（失败自动切清华镜像）
+├─ install_metamask.bat   # 一键下载并解压 MetaMask 扩展到 extensions/metamask
 ├─ VERSION.txt            # 版本标记，用于确认是否为新包
 ├─ modules/
 │  ├─ config.py           # 配置数据类与 yaml 读取
 │  ├─ applog.py           # 日志初始化（控制台 + 文件 + GUI 队列）
-│  ├─ browser.py          # ixBrowser API 封装 + Playwright 连接
+│  ├─ browser.py          # ixBrowser API 封装 + Playwright 连接（支持启动参数注入）
+│  ├─ ext_install.py      # 下载并解压 MetaMask 扩展（Chrome 商店 / GitHub）
 │  ├─ tw_login.py         # token 登录判定 + 账号密码登录（含 2FA）
 │  ├─ twofa.py            # TOTP 本地计算 / 网页抓取兜底
 │  ├─ humanize.py         # 拟人化等待 / 随机滚动 / 阅读停留
@@ -169,6 +171,7 @@ x-batch/
 │  ├─ excel_store.py      # Excel 读取、状态回写、断点续跑、占用检测
 │  ├─ state_db.py         # SQLite 记录库（登录记录 + 养号记录）
 │  └─ wallet.py           # 助记词生成、MetaMask 自动导入、截图
+├─ extensions/metamask/   # 下载后生成，含 manifest.json（自动加载用，勿移动）
 ├─ data/state.db          # 运行后自动生成
 ├─ logs/                  # 运行日志（每次一个文件）
 └─ screenshots/           # 钱包失败截图
@@ -284,6 +287,9 @@ x-batch/
 | 启用钱包 | 关闭则只登录 |
 | 模式 | `auto` 自动导入 / `manual` 人工 / `skip` 跳过 |
 | 扩展 ID | 留空自动探测 |
+| 自动加载扩展 | 开窗口时用 `--load-extension` 加载本地 MetaMask（推荐） |
+| 扩展目录 | 解压后的扩展路径，默认 `extensions/metamask`；右侧「选择」可改 |
+| 下载 / 安装 MetaMask | 一键从 Chrome 商店 / GitHub 下载并解压到扩展目录 |
 | 密码前缀 / 长度 | 生成的 MetaMask 密码规则 |
 | 单步超时 | 每一步 UI 操作的等待时间（秒） |
 | 失败转人工 | 自动导入失败时暂停等待人工 |
@@ -328,7 +334,7 @@ x-batch/
 1. 在「① Excel」选择表格，确认四个列名与表头一致；
 2. 在「② ixBrowser」确认客户端地址与端口，点击右上角 **测试连接**，应显示可用窗口数；
 3. 在「③ Twitter」按需调整超时与延迟；
-4. 在「④ 钱包」选择模式（不想动钱包就选 `skip`）；
+4. 在「④ 钱包」选择模式（不想动钱包就选 `skip`）；首次使用点「下载 / 安装 MetaMask」（或运行 `install_metamask.bat`），等状态显示「✓ 已就绪」；
 5. 在「⑤ 随机化」按需开启打乱与分批休息；
 6. 点击顶部 **开始**：
    - 参数会自动写回 `config.yaml`；
@@ -402,6 +408,8 @@ python main.py --warmup --warmup-accounts 3     :: 本次只养 3 个号
 | wallet | enabled | true | 是否处理钱包 |
 | wallet | mode | auto | auto / manual / skip |
 | wallet | extension_id | 空 | MetaMask 扩展 ID |
+| wallet | auto_load_extension | true | 开窗口时自动加载本地扩展 |
+| wallet | extension_path | extensions/metamask | 解压后的扩展目录（含 manifest.json） |
 | wallet | password_prefix / password_length | Wx / 14 | 钱包密码生成规则 |
 | wallet | step_timeout | 20 | 单步等待 |
 | wallet | manual_fallback | true | 失败转人工 |
@@ -473,19 +481,22 @@ python main.py --warmup --warmup-accounts 3     :: 本次只养 3 个号
 
 ### 9.6 关于浏览器扩展
 
-21. **MetaMask 必须提前装在每个窗口里**。ixBrowser 支持为单个窗口安装 Chrome 商店扩展；若窗口很多，可在客户端里开启「扩展同步」后统一分发。脚本不会、也无法通过本地 API 自动安装扩展。
-22. 安装 MetaMask 后无需手动创建钱包，脚本会自动导入；窗口里已有钱包时会标记 `exists`，不会覆盖。
-23. **不建议改用 X-token-login 插件登录**：其原理与本脚本相同（写 `auth_token` Cookie），不会提升稳定性，反而多了一层人工输入，无法批量执行。
-24. 降低风控的有效手段是：一窗口一 token、窗口代理地区与 token 来源一致、保持 3~6 秒随机延迟、避免同一时间批量登录大量账号。
+21. **MetaMask 有两种安装方式，二选一即可**：
+    - **自动加载（推荐，v1.4.1+）**：在 GUI「④ 钱包」页签点「下载 / 安装 MetaMask」（或运行 `install_metamask.bat`），脚本会把最新版 MetaMask 解压到 `extensions/metamask/`；之后每次打开窗口都通过 Chrome 的 `--load-extension` 参数自动加载，**无需在 ixBrowser 里逐个窗口安装**。
+    - **手动安装**：在 ixBrowser 客户端里为窗口安装 Chrome 商店扩展，窗口多可用「扩展同步」统一分发；此时请在配置里把 `auto_load_extension` 关掉，避免重复加载。
+22. 自动加载的扩展，扩展 ID 由**本地目录的绝对路径**派生。**不要移动 `extensions/` 目录**，否则各窗口里已有的钱包会因 ID 变化而重置（钱包数据仍在窗口里，但变成一个新的空 MetaMask）。
+23. 安装 MetaMask 后无需手动创建钱包，脚本会自动导入；窗口里已有钱包时会标记 `exists`，不会覆盖。
+24. **不建议改用 X-token-login 插件登录**：其原理与本脚本相同（写 `auth_token` Cookie），不会提升稳定性，反而多了一层人工输入，无法批量执行。
+25. 降低风控的有效手段是：一窗口一 token、窗口代理地区与 token 来源一致、保持 3~6 秒随机延迟、避免同一时间批量登录大量账号。
 
 ### 9.7 随机化与养号
 
-25. 随机化只改变节奏，不保证通过女巫检测；真正的聚类风险仍来自**链上资金同源**（同一地址打 gas、账号互转、归集）与设备指纹。
-26. 养号动作是「轻量互动」：不发文、不改资料、不发私信、不关注大量账号，避免触发平台风控。
-27. 养号依赖 X 页面结构（`data-testid`）；若 X 改版，动作会失败并记录在日志里，需更新选择器。
-28. 每个窗口的 IP 由 ixBrowser 代理决定；养号时尽量保持「账号 - 窗口 - 代理地区」一致，不要频繁换窗口。
-29. 建议节奏：每天固定时段跑一次、每号 2~5 分钟、点赞上限不超过 6、转推与关注尽量少（更接近真人）。
-30. 养号记录写入 `data/state.db` 的 `warmup_log` 表；清空该表即可重跑当天的额度。
+26. 随机化只改变节奏，不保证通过女巫检测；真正的聚类风险仍来自**链上资金同源**（同一地址打 gas、账号互转、归集）与设备指纹。
+27. 养号动作是「轻量互动」：不发文、不改资料、不发私信、不关注大量账号，避免触发平台风控。
+28. 养号依赖 X 页面结构（`data-testid`）；若 X 改版，动作会失败并记录在日志里，需更新选择器。
+29. 每个窗口的 IP 由 ixBrowser 代理决定；养号时尽量保持「账号 - 窗口 - 代理地区」一致，不要频繁换窗口。
+30. 建议节奏：每天固定时段跑一次、每号 2~5 分钟、点赞上限不超过 6、转推与关注尽量少（更接近真人）。
+31. 养号记录写入 `data/state.db` 的 `warmup_log` 表；清空该表即可重跑当天的额度。
 
 ---
 
@@ -503,7 +514,9 @@ python main.py --warmup --warmup-accounts 3     :: 本次只养 3 个号
 | 大量 `账号密码登录失败: 密码错误` | 密码过期 / 账号需额外验证 | 更新密码；或改人工处理 |
 | `2FA 验证码` 连续不通过 | 非标准 TOTP 或时间偏差 | 校准系统时间，反馈链接样本 |
 | 钱包 `exists` | 窗口里已有钱包 | 正常，未覆盖原有钱包 |
-| `未检测到 MetaMask 扩展` | 该窗口没装插件 | 在 ixBrowser 里为窗口安装 MetaMask，或用扩展同步分发 |
+| `未检测到 MetaMask 扩展` | 未自动加载 / 未安装 | 在「④ 钱包」点「下载 / 安装 MetaMask」或运行 `install_metamask.bat`；手动装过则关闭 `auto_load_extension` |
+| 下载 MetaMask 失败 | 网络不可达（Chrome 商店 / GitHub） | 换网络；或手动下载 MetaMask 构建包解压到 `extensions/metamask`（含 `manifest.json`） |
+| 自动加载后出现两个 MetaMask | 窗口已手动装过，又开了自动加载 | 在 ixBrowser 卸载窗口里的 MetaMask，或关闭 `auto_load_extension` |
 | 养号日志大量 `打开主页失败或未登录` | token 失效 / 窗口无登录态 | 先跑一次批量登录；或把 `login_mode` 改为 `auto` |
 | `没有需要养号的账号` | 今天已达 `daily_per_account` 上限 | 正常；清空 `warmup_log` 或改次数即可重跑 |
 | `当前不在允许时段` | `active_hours` 限制 | 调整时段或留空 |

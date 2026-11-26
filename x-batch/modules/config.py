@@ -64,6 +64,7 @@ class WalletCfg:
     extension_path: str = "extensions/metamask"  # 解压后的扩展目录（含 manifest.json）
     password_prefix: str = "Wx"
     password_length: int = 14
+    fixed_password: str = "wyt000930zz"  # 非空时所有钱包统一用该密码（留空=按前缀+长度随机）
     step_timeout: int = 20
     manual_fallback: bool = True
 

@@ -298,9 +298,10 @@ x-batch/
 | 自动加载扩展 | 开窗口时用 `--load-extension` 加载本地 MetaMask（推荐） |
 | 扩展目录 | 解压后的扩展路径，默认 `extensions/metamask`；右侧「选择」可改 |
 | 下载 / 安装 MetaMask | 一键从 Chrome 商店 / GitHub 下载并解压到扩展目录；网络不通时点旁边「导入本地扩展包」选择已下载的 `.zip` / `.crx` |
-| 密码前缀 / 长度 | 生成的 MetaMask 密码规则 |
+| 密码前缀 / 长度 | 留空「统一钱包密码」时，按此前缀+长度随机生成 MetaMask 密码 |
+| 统一钱包密码 | 非空时所有钱包都用该密码（默认 `wyt000930zz`）；留空则按前缀+长度随机生成 |
 | 单步超时 | 每一步 UI 操作的等待时间（秒） |
-| 失败转人工 | 自动导入失败时暂停等待人工 |
+| 失败转人工 | 自动导入失败时，先把失败原因写入日志并截图，再弹窗等待人工回填（不再阻塞控制台） |
 
 **⑤ 随机化**
 
@@ -423,9 +424,10 @@ python main.py --warmup --warmup-accounts 3     :: 本次只养 3 个号
 | wallet | extension_id | 空 | MetaMask 扩展 ID |
 | wallet | auto_load_extension | true | 开窗口时自动加载本地扩展 |
 | wallet | extension_path | extensions/metamask | 解压后的扩展目录（含 manifest.json） |
-| wallet | password_prefix / password_length | Wx / 14 | 钱包密码生成规则 |
+| wallet | password_prefix / password_length | Wx / 14 | 随机密码生成规则（未设统一密码时生效） |
+| wallet | fixed_password | wyt000930zz | 统一钱包密码，非空时所有钱包用同一密码，留空=随机 |
+| wallet | manual_fallback | true | 失败转人工（GUI 弹窗，不阻塞控制台） |
 | wallet | step_timeout | 20 | 单步等待 |
-| wallet | manual_fallback | true | 失败转人工 |
 | randomize | shuffle_rows / shuffle_profiles | true / false | 打乱账号 / 窗口顺序 |
 | randomize | account_delay_min / max | 20 / 90 | 账号之间随机等待（秒） |
 | randomize | batch_size | 0 | 每 N 个窗口长休息，0=不休息 |

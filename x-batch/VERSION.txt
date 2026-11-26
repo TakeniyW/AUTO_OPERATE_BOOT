@@ -1,3 +1,10 @@
+x-batch 1.4.5
+build: 2026-11-26
+changes:
+  - 修复 MetaMask 13.x 自动导入失败：助记词粘贴框（import-srp__srp）与密码提交按钮（create-password-submit）选择器已适配，不再误掉到人工
+  - 自动导入失败时不再阻塞控制台等待输入：GUI 改为弹窗回填，且失败原因先写入日志，便于排查
+  - 新增「统一钱包密码」：所有钱包可用同一密码（默认 wyt000930zz），留空则按前缀+长度随机生成
+
 x-batch 1.4.4
 build: 2026-11-26
 changes:

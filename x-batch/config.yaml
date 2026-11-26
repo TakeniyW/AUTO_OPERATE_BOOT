@@ -70,9 +70,11 @@ wallet:
   extension_path: "extensions/metamask"
   password_prefix: "Wx"
   password_length: 14
+  # 统一钱包密码：非空时所有钱包都用该密码；留空则按 前缀+长度 随机生成
+  fixed_password: "wyt000930zz"
   # 每一步 UI 操作的等待时间（秒）
   step_timeout: 20
-  # 自动导入失败时，暂停等待人工在窗口内完成
+  # 自动导入失败时：先把失败原因写入日志并截图，再弹窗等待人工回填（不阻塞控制台）
   manual_fallback: true
 
 # ================= 行为随机化 =================

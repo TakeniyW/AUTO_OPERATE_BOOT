@@ -8,7 +8,7 @@ import string
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Optional, Tuple
 
 from .config import WalletCfg
 
@@ -26,18 +26,37 @@ except ImportError:  # pragma: no cover
 
 EXT_RE = re.compile(r"chrome-extension://([a-p]{32})")
 
-# MetaMask 不同版本的选择器
+# MetaMask 不同版本的选择器（每个列表按新版本优先排列，_click/_fill 会依次尝试）
 SEL_IMPORT_ENTRY = '[data-testid="onboarding-import-wallet"]'
-SEL_SRP_TEXTAREA = '[data-testid="import-srp__srp-note"]'
+# 13.x 起助记词粘贴框的 testid 是 import-srp__srp；旧版是 import-srp__srp-note
+SEL_SRP_TEXTAREA = [
+    '[data-testid="import-srp__srp"]',
+    '[data-testid="import-srp__srp-note"]',
+    '[data-testid="import-srp__multi-srp__srp"]',
+]
 SEL_SRP_WORD = '[data-testid="import-srp__srp-word-{}"]'
-SEL_SRP_CONFIRM = '[data-testid="import-srp-confirm"]'
-SEL_PWD_NEW = '[data-testid="create-password-new"]'
-SEL_PWD_CONFIRM = '[data-testid="create-password-confirm"]'
+SEL_SRP_CONFIRM = [
+    '[data-testid="import-srp-confirm"]',
+    '[data-testid="import-srp__continue-button"]',
+]
+SEL_PWD_NEW = [
+    '[data-testid="create-password-new"]',
+    '[data-testid="create-password-new-input"]',
+]
+SEL_PWD_CONFIRM = [
+    '[data-testid="create-password-confirm"]',
+    '[data-testid="create-password-confirm-input"]',
+]
 SEL_PWD_TERMS = '[data-testid="create-password-terms"]'
-SEL_PWD_SUBMIT = '[data-testid="create-password-wallet"]'
+# 13.x 起提交按钮 testid 是 create-password-submit；旧版是 create-password-wallet
+SEL_PWD_SUBMIT = [
+    '[data-testid="create-password-submit"]',
+    '[data-testid="create-password-wallet"]',
+]
 SEL_READY = [
     '[data-testid="metamask-onboarding-wallet-ready-done"]',
     '[data-testid="onboarding-complete-done"]',
+    '[data-testid="onboarding-complete-done-button"]',
 ]
 SEL_UNLOCK = '[data-testid="unlock-password"]'
 SEL_HOME = '[data-testid="account-menu-icon"]'
@@ -144,6 +163,12 @@ def _visible(page: Page, selector: str, timeout_ms: int = 1500) -> bool:
         return False
 
 
+def _visible_any(page: Page, selectors, timeout_ms: int = 1500) -> bool:
+    if isinstance(selectors, str):
+        selectors = [selectors]
+    return any(_visible(page, s, timeout_ms) for s in selectors)
+
+
 def _click(page: Page, selectors, timeout_s: int) -> bool:
     if isinstance(selectors, str):
         selectors = [selectors]
@@ -171,16 +196,20 @@ def _click_text(page: Page, pattern: str, timeout_s: int) -> bool:
         return False
 
 
-def _fill(page: Page, selector: str, value: str, timeout_s: int) -> bool:
-    try:
-        locator = page.locator(selector).first
-        if locator.count() == 0:
-            return False
-        locator.wait_for(state="visible", timeout=min(timeout_s * 1000, 8000))
-        locator.fill(value, timeout=timeout_s * 1000)
-        return True
-    except Exception:
-        return False
+def _fill(page: Page, selectors, value: str, timeout_s: int) -> bool:
+    if isinstance(selectors, str):
+        selectors = [selectors]
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.count() == 0:
+                continue
+            locator.wait_for(state="visible", timeout=min(timeout_s * 1000, 8000))
+            locator.fill(value, timeout=timeout_s * 1000)
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def import_to_metamask(
@@ -201,7 +230,7 @@ def import_to_metamask(
             return False, "该窗口已存在钱包", page
 
         # 未出现欢迎页时，直接尝试导入路由
-        if not _visible(page, SEL_IMPORT_ENTRY, 3000) and not _visible(
+        if not _visible(page, SEL_IMPORT_ENTRY, 3000) and not _visible_any(
             page, SEL_SRP_TEXTAREA, 3000
         ):
             try:
@@ -214,7 +243,7 @@ def import_to_metamask(
             except Exception:
                 pass
 
-        # 欢迎页：同意条款 -> 导入已有钱包
+        # 欢迎页：同意条款 -> 导入已有钱包（13.x 起条款框 testid 可能不同，点不到就忽略）
         _click(page, '[data-testid="onboarding-terms-checkbox"]', timeout_s)
         if not _click(page, SEL_IMPORT_ENTRY, timeout_s):
             _click_text(
@@ -222,10 +251,10 @@ def import_to_metamask(
             )
         _click_text(page, r"^(I agree|我同意|同意)$", timeout_s)
 
-        # 填助记词
+        # 填助记词：优先用整块粘贴框，退回逐词输入
         words = mnemonic.split()
         filled = False
-        if _visible(page, SEL_SRP_TEXTAREA, 5000):
+        if _visible_any(page, SEL_SRP_TEXTAREA, 5000):
             filled = _fill(page, SEL_SRP_TEXTAREA, mnemonic, timeout_s)
         else:
             for index, word in enumerate(words):
@@ -277,6 +306,21 @@ def _prompt_manual() -> Tuple[str, str]:
         return "", ""
 
 
+def _do_manual(
+    detail: str, manual_callback: Optional[Callable[[str], Tuple[str, str]]]
+) -> Tuple[str, str]:
+    """统一的人工回填入口：GUI 传弹窗回调，CLI 用控制台 input。"""
+    if manual_callback is not None:
+        try:
+            res = manual_callback(detail)
+            if isinstance(res, (tuple, list)) and len(res) >= 2:
+                return str(res[0] or ""), str(res[1] or "")
+            return "", ""
+        except Exception:
+            return "", ""
+    return _prompt_manual()
+
+
 def _take_screenshot(page: Optional[Page], directory: str, label: str) -> None:
     if page is None:
         return
@@ -314,23 +358,30 @@ def ensure_wallet(
     cfg: WalletCfg,
     screenshot_dir: str,
     label: str = "",
+    manual_callback: Optional[Callable[[str], Tuple[str, str]]] = None,
 ) -> WalletResult:
     if not cfg.enabled or cfg.mode == "skip":
         return WalletResult("skip", note="已跳过钱包")
 
     if cfg.mode == "manual":
-        address, mnemonic = _prompt_manual()
+        address, mnemonic = _do_manual("请手动创建/导入钱包", manual_callback)
         return WalletResult("manual", address=address, mnemonic=mnemonic, note="人工创建")
 
     try:
-        mnemonic, address, password = generate_wallet(
+        mnemonic, address, gen_password = generate_wallet(
             cfg.password_prefix, cfg.password_length
         )
     except Exception as exc:
         return WalletResult("failed", note=str(exc))
+    # 统一密码：配置了 fixed_password 时所有钱包都用它，否则按前缀+长度随机生成
+    fixed = (getattr(cfg, "fixed_password", "") or "").strip()
+    password = fixed or gen_password
 
     extension_id = find_extension_id(browser, context, cfg.extension_id)
     if not extension_id:
+        log.warning(
+            "未检测到 MetaMask 扩展（extension_id=%s）", cfg.extension_id or "自动探测"
+        )
         return WalletResult(
             "failed",
             note=(
@@ -364,9 +415,11 @@ def ensure_wallet(
             pass
         return WalletResult("exists", note=detail)
 
+    # 失败原因先打到日志，再决定是否转人工（不再静默阻塞控制台）
     _take_screenshot(page, screenshot_dir, label)
+    log.warning("自动导入失败: %s", detail)
     if cfg.manual_fallback:
-        manual_address, manual_mnemonic = _prompt_manual()
+        manual_address, manual_mnemonic = _do_manual(detail, manual_callback)
         return WalletResult(
             "manual",
             address=manual_address or address,

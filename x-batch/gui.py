@@ -17,9 +17,9 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from queue import Empty
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
-APP_TITLE = "x-batch v1.4.4 · ixBrowser 批量推特登录 + 钱包初始化 + 养号"
+APP_TITLE = "x-batch v1.4.5 · ixBrowser 批量推特登录 + 钱包初始化 + 养号"
 
 _WORKDIR = Path(__file__).parent.resolve()
 _STARTUP_LOG = _WORKDIR / "startup_error.log"
@@ -425,32 +425,41 @@ class App(tk.Tk):
         self._wallet_plen_var = tk.StringVar(value="14")
         ttk.Entry(f, textvariable=self._wallet_plen_var, width=10).grid(row=4, column=1, sticky="w", pady=4, padx=4)
 
+        ttk.Label(f, text="统一钱包密码").grid(row=5, column=0, sticky="w", pady=4)
+        self._wallet_fixedpwd_var = tk.StringVar(value="wyt000930zz")
+        ttk.Entry(f, textvariable=self._wallet_fixedpwd_var, width=24, show="*").grid(
+            row=5, column=1, sticky="w", pady=4, padx=4
+        )
+        ttk.Label(f, text="(留空则按前缀+长度随机生成)", foreground="#7f8c8d").grid(
+            row=5, column=2, sticky="w", pady=4
+        )
+
         self._wallet_fallback_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(f, text="自动失败时转人工", variable=self._wallet_fallback_var).grid(
-            row=5, column=0, columnspan=3, sticky="w", pady=4
+            row=6, column=0, columnspan=3, sticky="w", pady=4
         )
 
         # ---- 自动加载本地扩展（--load-extension） ----
         sep = ttk.Separator(f, orient="horizontal")
-        sep.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        sep.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 4))
 
         self._wallet_autoload_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             f,
             text="开窗口时自动加载本地 MetaMask（--load-extension，无需逐个窗口手动安装）",
             variable=self._wallet_autoload_var,
-        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=2)
+        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=2)
 
-        ttk.Label(f, text="扩展目录").grid(row=8, column=0, sticky="w", pady=4)
+        ttk.Label(f, text="扩展目录").grid(row=9, column=0, sticky="w", pady=4)
         self._wallet_extpath_var = tk.StringVar(value="extensions/metamask")
-        path_row = ttk.Frame(f); path_row.grid(row=8, column=1, columnspan=2, sticky="ew", padx=4)
+        path_row = ttk.Frame(f); path_row.grid(row=9, column=1, columnspan=2, sticky="ew", padx=4)
         path_row.columnconfigure(0, weight=1)
         ttk.Entry(path_row, textvariable=self._wallet_extpath_var).grid(row=0, column=0, sticky="ew")
         ttk.Button(path_row, text="选择...", width=8, command=self._pick_extension_dir).grid(
             row=0, column=1, padx=(4, 0)
         )
 
-        btn_row = ttk.Frame(f); btn_row.grid(row=9, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        btn_row = ttk.Frame(f); btn_row.grid(row=10, column=0, columnspan=3, sticky="w", pady=(2, 0))
         ttk.Button(btn_row, text="⬇ 下载 / 安装 MetaMask", command=self._on_install_extension).pack(
             side=tk.LEFT
         )
@@ -470,7 +479,7 @@ class App(tk.Tk):
                 "钱包会重置。已在 ixBrowser 手动装过 MetaMask 的窗口，请关闭「自动加载」以免重复。"
             ),
             foreground="#7f8c8d", wraplength=440, justify="left",
-        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ).grid(row=11, column=0, columnspan=3, sticky="w", pady=(10, 0))
         return f
 
     def _refresh_extension_status(self) -> None:
@@ -878,6 +887,7 @@ class App(tk.Tk):
         self._wallet_extpath_var.set(s.wallet.extension_path or "extensions/metamask")
         self._wallet_pfx_var.set(s.wallet.password_prefix)
         self._wallet_plen_var.set(str(s.wallet.password_length))
+        self._wallet_fixedpwd_var.set(s.wallet.fixed_password or "")
         self._wallet_fallback_var.set(s.wallet.manual_fallback)
         self._refresh_extension_status()
         self._on_pwd_login_toggle()
@@ -992,6 +1002,7 @@ class App(tk.Tk):
         s.wallet.password_length = max(
             len(s.wallet.password_prefix) + 5, _int(self._wallet_plen_var, 14)
         )
+        s.wallet.fixed_password = self._wallet_fixedpwd_var.get().strip()
         s.wallet.manual_fallback = bool(self._wallet_fallback_var.get())
 
         s.randomize.shuffle_rows = bool(self._rnd_shuffle_rows_var.get())
@@ -1152,6 +1163,8 @@ class App(tk.Tk):
         min_len = len(s.wallet.password_prefix) + 5
         if s.wallet.password_length < min_len:
             problems.append(f"钱包密码总长至少为 前缀长度+5（{min_len}）")
+        if s.wallet.fixed_password and len(s.wallet.fixed_password) < 8:
+            problems.append("统一钱包密码至少 8 位")
         if problems:
             messagebox.showerror("参数错误", "\n".join(problems))
             return False
@@ -1228,6 +1241,7 @@ class App(tk.Tk):
                     "extension_path": s.wallet.extension_path,
                     "password_prefix": s.wallet.password_prefix,
                     "password_length": s.wallet.password_length,
+                    "fixed_password": s.wallet.fixed_password,
                     "step_timeout": s.wallet.step_timeout,
                     "manual_fallback": s.wallet.manual_fallback,
                 },
@@ -1506,6 +1520,37 @@ class App(tk.Tk):
             messagebox.showerror("启动失败", str(exc))
             self._set_running_state(False)
 
+    def _manual_wallet_callback(self, detail: str):
+        """钱包自动导入失败时的 GUI 回填入口（替代控制台 input，不阻塞批处理控制台）。
+
+        在主线程弹窗提示用户在浏览器里手动完成，再回填地址/助记词；期间批处理暂停等待。
+        """
+        self._log_queue.put(f"[WARN] 钱包自动导入失败：{detail}")
+        self._log_queue.put("[INFO] 请在浏览器窗口内手动完成 MetaMask 创建/导入，完成后在弹窗中填写。")
+        result = {"address": "", "mnemonic": ""}
+        done = threading.Event()
+
+        def ask() -> None:
+            try:
+                messagebox.showwarning(
+                    "钱包自动导入失败",
+                    f"原因：{detail}\n\n请在浏览器窗口内手动完成 MetaMask 创建/导入，"
+                    "完成后点「确定」继续填写地址。",
+                )
+                addr = simpledialog.askstring("钱包地址", "输入钱包地址（可留空）：", parent=self)
+                mn = simpledialog.askstring("助记词", "输入助记词（可留空）：", parent=self)
+                result["address"] = (addr or "").strip()
+                result["mnemonic"] = (mn or "").strip()
+            finally:
+                done.set()
+
+        self.after(0, ask)
+        # 每 0.5s 检查一次，收到停止信号时尽快放行
+        while not done.wait(0.5):
+            if self._stop_event and self._stop_event.is_set():
+                break
+        return result["address"], result["mnemonic"]
+
     def _on_stop(self) -> None:
         if not self._is_running:
             return
@@ -1522,7 +1567,8 @@ class App(tk.Tk):
                 warmup_run(s, gui_queue=self._log_queue, stop_event=self._stop_event)
             else:
                 run(s, gui_queue=self._log_queue, stop_event=self._stop_event,
-                    base_dir=str(self._workdir))
+                    base_dir=str(self._workdir),
+                    manual_callback=self._manual_wallet_callback)
         except Exception as exc:
             self._log_queue.put(f"[ERROR] 运行异常: {exc}")
         finally:

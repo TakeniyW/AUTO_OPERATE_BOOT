@@ -18,7 +18,7 @@ import os
 import random
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from modules.applog import QueueLogHandler, emit_stats, setup_logging
 from modules.browser import BrowserManager, IxBrowserError
@@ -74,12 +74,14 @@ def handle_wallet(
     store: ExcelStore,
     row: AccountRow,
     label: str,
+    manual_callback: Optional[Callable[[str], tuple]] = None,
 ) -> None:
     if not settings.wallet.enabled or settings.wallet.mode == "skip":
         return
     log.info("  开始处理钱包 ...")
     result = wallet.ensure_wallet(
-        browser, context, settings.wallet, settings.output.screenshot_dir, label
+        browser, context, settings.wallet, settings.output.screenshot_dir, label,
+        manual_callback=manual_callback,
     )
 
     if result.status == "ok":
@@ -268,7 +270,7 @@ def process_profile(
                 store.save()
                 stats["ok"] += 1
                 stats["token_ok"] += 1
-                _after_login(browser, context, settings, store, row, label)
+                _after_login(browser, context, settings, store, row, label, manual_callback)
                 return False
 
             if token_status != TOKEN_UNKNOWN:
@@ -314,7 +316,7 @@ def process_profile(
                     store.save()
                     stats["ok"] += 1
                     stats["pwd_ok"] += 1
-                    _after_login(browser, context, settings, store, row, label)
+                    _after_login(browser, context, settings, store, row, label, manual_callback)
                     return False
 
                 log.warning("    账号密码登录失败: %s", password_result.detail)
@@ -411,9 +413,10 @@ def _finish_success(
 
 
 def _after_login(browser, context, settings: Settings, store: ExcelStore,
-                 row: AccountRow, label: str) -> None:
+                 row: AccountRow, label: str,
+                 manual_callback: Optional[Callable[[str], tuple]] = None) -> None:
     try:
-        handle_wallet(browser, context, settings, store, row, label)
+        handle_wallet(browser, context, settings, store, row, label, manual_callback)
     except Exception as exc:
         store.update(row, 备注=f"钱包处理异常: {exc}")
         store.save()
@@ -426,6 +429,7 @@ def run(
     gui_queue: Optional[Queue] = None,
     stop_event: Optional[threading.Event] = None,
     base_dir: str = ".",
+    manual_callback: Optional[Callable[[str], tuple]] = None,
 ) -> int:
     """核心流程：CLI 和 GUI 都调用这个函数。返回 0 成功 / 非 0 失败。"""
     setup_logging(settings, gui_queue)

@@ -23,6 +23,9 @@ ixbrowser:
   port: 53200
   # 只处理窗口名称包含该关键字的窗口，留空 = 全部窗口
   profile_name_filter: ""
+  # 窗口序号范围（按窗口列表顺序，1 开始；结束 0 = 到最后一个）
+  profile_start: 1
+  profile_end: 0
   # 最多处理几个窗口，0 = 全部
   profile_limit: 1
   # 调试用：处理完不关闭窗口

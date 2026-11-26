@@ -16,7 +16,7 @@ from pathlib import Path
 from queue import Empty
 from tkinter import filedialog, messagebox, ttk
 
-APP_TITLE = "x-batch v1.3 · ixBrowser 批量推特登录 + 钱包初始化"
+APP_TITLE = "x-batch v1.3.2 · ixBrowser 批量推特登录 + 钱包初始化"
 
 _WORKDIR = Path(__file__).parent.resolve()
 _STARTUP_LOG = _WORKDIR / "startup_error.log"
@@ -197,28 +197,36 @@ class App(tk.Tk):
 
         ttk.Label(f, text="账号列名").grid(row=3, column=0, sticky="w", pady=4)
         self._user_col_var = tk.StringVar(value="账号")
-        ttk.Entry(f, textvariable=self._user_col_var).grid(row=3, column=1, sticky="ew", pady=4, padx=4)
+        self._user_entry = ttk.Entry(f, textvariable=self._user_col_var)
+        self._user_entry.grid(row=3, column=1, sticky="ew", pady=4, padx=4)
 
         ttk.Label(f, text="密码列名").grid(row=4, column=0, sticky="w", pady=4)
         self._pwd_col_var = tk.StringVar(value="密码")
-        ttk.Entry(f, textvariable=self._pwd_col_var).grid(row=4, column=1, sticky="ew", pady=4, padx=4)
+        self._pwd_entry = ttk.Entry(f, textvariable=self._pwd_col_var)
+        self._pwd_entry.grid(row=4, column=1, sticky="ew", pady=4, padx=4)
 
         ttk.Label(f, text="2FA 链接列名").grid(row=5, column=0, sticky="w", pady=4)
         self._twofa_col_var = tk.StringVar(value="2FA")
-        ttk.Entry(f, textvariable=self._twofa_col_var).grid(row=5, column=1, sticky="ew", pady=4, padx=4)
+        self._twofa_entry = ttk.Entry(f, textvariable=self._twofa_col_var)
+        self._twofa_entry.grid(row=5, column=1, sticky="ew", pady=4, padx=4)
+
+        self._pwd_hint_var = tk.StringVar(value="")
+        ttk.Label(f, textvariable=self._pwd_hint_var, foreground="#7f8c8d").grid(
+            row=6, column=0, columnspan=3, sticky="w", pady=(2, 0)
+        )
 
         self._backup_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(f, text="首次运行前备份原表 (.bak)", variable=self._backup_var).grid(
-            row=6, column=0, columnspan=3, sticky="w", pady=4
+            row=7, column=0, columnspan=3, sticky="w", pady=4
         )
 
         ttk.Label(
             f,
-            text="提示: 表头需包含 token / 账号 / 密码 / 2FA；处理后会追加 token登录/账号登录/最终结果 等列。",
+            text="提示: 只跑 token 时表里只需 token 一列；启用账号密码登录后还需 账号 / 密码 / 2FA。",
             foreground="#7f8c8d",
             wraplength=380,
             justify="left",
-        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(10, 0))
         return f
 
     def _build_ix_tab(self, parent: ttk.Widget) -> ttk.Frame:
@@ -239,15 +247,35 @@ class App(tk.Tk):
         self._ix_filter_var = tk.StringVar()
         ttk.Entry(f, textvariable=self._ix_filter_var).grid(row=1, column=1, sticky="ew", pady=4, padx=4)
 
-        ttk.Label(f, text="本次处理窗口数").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Label(f, text="窗口序号范围").grid(row=2, column=0, sticky="w", pady=4)
+        range_row = ttk.Frame(f)
+        range_row.grid(row=2, column=1, sticky="w", pady=4, padx=4)
+        self._ix_start_var = tk.StringVar(value="1")
+        self._ix_end_var = tk.StringVar(value="0")
+        ttk.Entry(range_row, textvariable=self._ix_start_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(range_row, text="~").pack(side=tk.LEFT, padx=4)
+        ttk.Entry(range_row, textvariable=self._ix_end_var, width=6).pack(side=tk.LEFT)
+        ttk.Label(f, text="(1 开始；结束 0 = 到最后一个)", foreground="#7f8c8d").grid(
+            row=2, column=2, sticky="w", pady=4
+        )
+
+        ttk.Label(f, text="本次处理窗口数").grid(row=3, column=0, sticky="w", pady=4)
         self._ix_limit_var = tk.StringVar(value="1")
-        ttk.Entry(f, textvariable=self._ix_limit_var, width=10).grid(row=2, column=1, sticky="w", pady=4, padx=4)
-        ttk.Label(f, text="(0=全部)", foreground="#7f8c8d").grid(row=2, column=2, sticky="w", pady=4)
+        ttk.Entry(f, textvariable=self._ix_limit_var, width=10).grid(row=3, column=1, sticky="w", pady=4, padx=4)
+        ttk.Label(f, text="(0=全部)", foreground="#7f8c8d").grid(row=3, column=2, sticky="w", pady=4)
 
         self._keep_open_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(f, text="完成后保留窗口(调试用)", variable=self._keep_open_var).grid(
-            row=3, column=0, columnspan=3, sticky="w", pady=4
+            row=4, column=0, columnspan=3, sticky="w", pady=4
         )
+
+        ttk.Label(
+            f,
+            text="序号按 ixBrowser 窗口列表顺序（一般是创建顺序），点“测试连接”可查看对应关系。",
+            foreground="#7f8c8d",
+            wraplength=380,
+            justify="left",
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
         return f
 
     def _build_tw_tab(self, parent: ttk.Widget) -> ttk.Frame:
@@ -280,6 +308,7 @@ class App(tk.Tk):
             f,
             text="token 登录失败时，改用账号密码登录（自动获取 2FA 验证码）",
             variable=self._tw_pwd_login_var,
+            command=self._on_pwd_login_toggle,
         ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 4))
 
         ttk.Label(f, text="账号密码登录超时 (秒)").grid(row=5, column=0, sticky="w", pady=4)
@@ -427,6 +456,8 @@ class App(tk.Tk):
         self._ix_port_var.set(str(s.ixbrowser.port))
         self._ix_filter_var.set(s.ixbrowser.profile_name_filter)
         self._ix_limit_var.set(str(s.ixbrowser.profile_limit))
+        self._ix_start_var.set(str(s.ixbrowser.profile_start))
+        self._ix_end_var.set(str(s.ixbrowser.profile_end))
         self._keep_open_var.set(s.ixbrowser.keep_window_open)
 
         self._tw_timeout_var.set(str(s.twitter.login_timeout))
@@ -443,6 +474,19 @@ class App(tk.Tk):
         self._wallet_pfx_var.set(s.wallet.password_prefix)
         self._wallet_plen_var.set(str(s.wallet.password_length))
         self._wallet_fallback_var.set(s.wallet.manual_fallback)
+        self._on_pwd_login_toggle()
+
+    def _on_pwd_login_toggle(self) -> None:
+        """账号密码登录关闭时，把相关列名输入框置灰，避免误解为必填。"""
+        enabled = bool(self._tw_pwd_login_var.get())
+        state = "normal" if enabled else "disabled"
+        for widget in (self._user_entry, self._pwd_entry, self._twofa_entry):
+            widget.configure(state=state)
+        self._pwd_hint_var.set(
+            "已启用账号密码登录：需要 账号 / 密码 / 2FA 三列"
+            if enabled
+            else "已关闭账号密码登录：只需 token 一列即可运行"
+        )
 
     def _collect_settings(self) -> Settings:
         """从 GUI 各变量构建一个新的 Settings，保留其他未暴露字段（output.home_url 等）。"""
@@ -472,6 +516,8 @@ class App(tk.Tk):
         s.ixbrowser.port = _int(self._ix_port_var, 53200)
         s.ixbrowser.profile_name_filter = self._ix_filter_var.get().strip()
         s.ixbrowser.profile_limit = _int(self._ix_limit_var, 1)
+        s.ixbrowser.profile_start = max(1, _int(self._ix_start_var, 1))
+        s.ixbrowser.profile_end = max(0, _int(self._ix_end_var, 0))
         s.ixbrowser.keep_window_open = bool(self._keep_open_var.get())
 
         s.twitter.login_timeout = _int(self._tw_timeout_var, 25)
@@ -506,8 +552,15 @@ class App(tk.Tk):
             from modules.browser import BrowserManager
             bm = BrowserManager(s.ixbrowser)
             profiles = bm.list_profiles()
-            messagebox.showinfo("ixBrowser 连接成功",
-                                f"已连接 {s.ixbrowser.host}:{s.ixbrowser.port}\n共发现 {len(profiles)} 个窗口")
+            lines = [
+                f"已连接 {s.ixbrowser.host}:{s.ixbrowser.port}，共 {len(profiles)} 个窗口",
+                "",
+            ]
+            for index, item in enumerate(profiles[:20], start=1):
+                lines.append(f"[{index}] {item['name'] or '(未命名)'}  id={item['id']}")
+            if len(profiles) > 20:
+                lines.append(f"... 其余 {len(profiles) - 20} 个省略")
+            messagebox.showinfo("ixBrowser 连接成功", "\n".join(lines))
         except Exception as exc:
             messagebox.showerror("连接失败", str(exc))
 
@@ -536,6 +589,8 @@ class App(tk.Tk):
                 "ixbrowser": {
                     "host": s.ixbrowser.host, "port": s.ixbrowser.port,
                     "profile_name_filter": s.ixbrowser.profile_name_filter,
+                    "profile_start": s.ixbrowser.profile_start,
+                    "profile_end": s.ixbrowser.profile_end,
                     "profile_limit": s.ixbrowser.profile_limit,
                     "keep_window_open": s.ixbrowser.keep_window_open,
                 },

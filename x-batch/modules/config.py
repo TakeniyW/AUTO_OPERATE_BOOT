@@ -33,6 +33,8 @@ class IxCfg:
     host: str = "127.0.0.1"
     port: int = 53200
     profile_name_filter: str = ""
+    profile_start: int = 1          # 起始序号（1 开始，按窗口列表顺序）
+    profile_end: int = 0            # 结束序号，0 = 到最后一个
     profile_limit: int = 0          # 0 = 不限制
     keep_window_open: bool = False  # 调试时可保留窗口
 

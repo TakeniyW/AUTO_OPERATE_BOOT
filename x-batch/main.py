@@ -443,12 +443,6 @@ def run(
         log.error("读取 Excel 失败: %s", exc)
         return 1
 
-    if store.is_write_locked():
-        log.warning(
-            "原表正在被 Excel/WPS 打开，状态无法写回原表（会自动另存为 _results.xlsx）。"
-            "建议先关闭表格再运行。"
-        )
-
     try:
         db = StateDB(settings.output.state_db)
     except Exception as exc:
@@ -471,12 +465,23 @@ def run(
     keyword = settings.ixbrowser.profile_name_filter
     if keyword:
         profiles = [p for p in profiles if keyword in p["name"]]
+
+    # 按 ixBrowser 窗口列表顺序截取 [起始, 结束] 区间（1 开始，结束 0 = 到末尾）
+    start = max(1, settings.ixbrowser.profile_start)
+    end = settings.ixbrowser.profile_end
+    if end >= start:
+        profiles = profiles[start - 1 : end]
+    else:
+        profiles = profiles[start - 1 :]
     if settings.ixbrowser.profile_limit > 0:
         profiles = profiles[: settings.ixbrowser.profile_limit]
 
-    log.info("可用窗口: %d 个", len(profiles))
+    log.info("可用窗口: %d 个（序号区间 %s）", len(profiles),
+             f"{start}-{end or '末尾'}")
+    for index, item in enumerate(profiles, start=1):
+        log.info("  [%d] %s (%s)", index, item["name"] or "(未命名)", item["id"])
     if not profiles:
-        log.error("没有可用窗口，请检查 ixBrowser 窗口列表或过滤条件")
+        log.error("没有可用窗口，请检查 ixBrowser 窗口列表、序号区间或过滤条件")
         return 1
 
     stats = {

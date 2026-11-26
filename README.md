@@ -297,7 +297,7 @@ x-batch/
 | 扩展 ID | 留空自动探测 |
 | 自动加载扩展 | 开窗口时用 `--load-extension` 加载本地 MetaMask（推荐） |
 | 扩展目录 | 解压后的扩展路径，默认 `extensions/metamask`；右侧「选择」可改 |
-| 下载 / 安装 MetaMask | 一键从 Chrome 商店 / GitHub 下载并解压到扩展目录 |
+| 下载 / 安装 MetaMask | 一键从 Chrome 商店 / GitHub 下载并解压到扩展目录；网络不通时点旁边「导入本地扩展包」选择已下载的 `.zip` / `.crx` |
 | 密码前缀 / 长度 | 生成的 MetaMask 密码规则 |
 | 单步超时 | 每一步 UI 操作的等待时间（秒） |
 | 失败转人工 | 自动导入失败时暂停等待人工 |
@@ -344,7 +344,7 @@ x-batch/
 1. 在「① Excel」选择表格，确认四个列名与表头一致（还没有表格可先点 **下载登录模版** 生成一份）；
 2. 在「② ixBrowser」确认客户端地址与端口，点击右上角 **测试连接**，应显示可用窗口数；
 3. 在「③ Twitter」按需调整超时与延迟；
-4. 在「④ 钱包」选择模式（不想动钱包就选 `skip`）；首次使用点「下载 / 安装 MetaMask」（或运行 `install_metamask.bat`），等状态显示「✓ 已就绪」；
+4. 在「④ 钱包」选择模式（不想动钱包就选 `skip`）；首次使用点「下载 / 安装 MetaMask」（或运行 `install_metamask.bat`），等状态显示「✓ 已就绪」；下载失败时，点「导入本地扩展包」选择已下载的 `.zip` / `.crx` 离线安装；
 5. 在「⑤ 随机化」按需开启打乱与分批休息；
 6. 点击顶部 **开始**：
    - 参数会自动写回 `config.yaml`（运行中参数与保存/加载按钮会锁定，停止后恢复）；
@@ -494,8 +494,9 @@ python main.py --warmup --warmup-accounts 3     :: 本次只养 3 个号
 
 ### 9.6 关于浏览器扩展
 
-21. **MetaMask 有两种安装方式，二选一即可**：
+21. **MetaMask 有三种安装方式，二选一即可**：
     - **自动加载（推荐，v1.4.1+）**：在 GUI「④ 钱包」页签点「下载 / 安装 MetaMask」（或运行 `install_metamask.bat`），脚本会把最新版 MetaMask 解压到 `extensions/metamask/`；之后每次打开窗口都通过 Chrome 的 `--load-extension` 参数自动加载，**无需在 ixBrowser 里逐个窗口安装**。
+    - **本地导入（v1.4.4+，离线可用）**：自行从 Chrome 应用商店或 MetaMask GitHub Release 下载扩展包（`.zip` / `.crx`），在「④ 钱包」点「导入本地扩展包」选择该文件即可解压安装，不依赖网络。
     - **手动安装**：在 ixBrowser 客户端里为窗口安装 Chrome 商店扩展，窗口多可用「扩展同步」统一分发；此时请在配置里把 `auto_load_extension` 关掉，避免重复加载。
 22. 自动加载的扩展，扩展 ID 由**本地目录的绝对路径**派生。**不要移动 `extensions/` 目录**，否则各窗口里已有的钱包会因 ID 变化而重置（钱包数据仍在窗口里，但变成一个新的空 MetaMask）。
 23. 安装 MetaMask 后无需手动创建钱包，脚本会自动导入；窗口里已有钱包时会标记 `exists`，不会覆盖。
@@ -527,8 +528,8 @@ python main.py --warmup --warmup-accounts 3     :: 本次只养 3 个号
 | 大量 `账号密码登录失败: 密码错误` | 密码过期 / 账号需额外验证 | 更新密码；或改人工处理 |
 | `2FA 验证码` 连续不通过 | 非标准 TOTP 或时间偏差 | 校准系统时间，反馈链接样本 |
 | 钱包 `exists` | 窗口里已有钱包 | 正常，未覆盖原有钱包 |
-| `未检测到 MetaMask 扩展` | 未自动加载 / 未安装 | 在「④ 钱包」点「下载 / 安装 MetaMask」或运行 `install_metamask.bat`；手动装过则关闭 `auto_load_extension` |
-| 下载 MetaMask 失败 | 网络不可达（Chrome 商店 / GitHub） | 换网络；或手动下载 MetaMask 构建包解压到 `extensions/metamask`（含 `manifest.json`） |
+| `未检测到 MetaMask 扩展` | 未自动加载 / 未安装 | 在「④ 钱包」点「下载 / 安装 MetaMask」或「导入本地扩展包」；手动装过则关闭 `auto_load_extension` |
+| 下载 MetaMask 失败 | 网络不可达（Chrome 商店 / GitHub） | 在「④ 钱包」点「导入本地扩展包」，选择已下载的 `.zip` / `.crx`；或换网络重试 |
 | 自动加载后出现两个 MetaMask | 窗口已手动装过，又开了自动加载 | 在 ixBrowser 卸载窗口里的 MetaMask，或关闭 `auto_load_extension` |
 | 养号日志大量 `打开主页失败或未登录` | token 失效 / 窗口无登录态 | 先跑一次批量登录；或把 `login_mode` 改为 `auto` |
 | `没有需要养号的账号` | 今天已达 `daily_per_account` 上限 | 正常；清空 `warmup_log` 或改次数即可重跑 |

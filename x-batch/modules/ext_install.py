@@ -1,8 +1,8 @@
 """自动下载并解压 MetaMask 扩展，供 Chrome --load-extension 加载。
 
-来源（按顺序尝试，任取其一）：
-  1. Chrome 应用商店 CRX —— 始终最新，无需解析版本
-  2. MetaMask GitHub Releases 的 metamask-chrome-<version>.zip
+安装方式（GUI「④ 钱包」提供）：
+  1. 在线下载（install_metamask）—— 按顺序尝试 Chrome 应用商店 CRX、GitHub Releases
+  2. 本地导入（install_from_local）—— 用户已下载好 .zip / .crx 时离线导入，不依赖网络
 
 下载优先用 curl（Windows 10+/macOS/Linux 自带，兼容代理环境），
 失败回退到 urllib。解压后保证 manifest.json 位于目标目录根。
@@ -138,6 +138,32 @@ def _crx_to_zip(data: bytes) -> bytes:
     return data
 
 
+def _common_dir_prefix(files: List[str]) -> str:
+    """按路径组件求所有文件共有的顶层目录前缀（带尾斜杠），没有则返回空串。
+
+    替代 os.path.commonprefix 的字符串比较，避免 ``abc/`` 与 ``abd/`` 被误判为
+    共有前缀 ``ab``。
+    """
+    if not files:
+        return ""
+    # manifest.json 所在目录优先：若 manifest 在子目录中且所有文件都在该目录下，
+    # 就剥离该目录
+    manifests = [n for n in files if n.endswith("manifest.json")]
+    candidates: List[str] = []
+    for m in manifests:
+        parts = m.split("/")
+        if len(parts) > 1:
+            candidates.append(parts[0] + "/")
+    # 退而求其次：所有文件共有的唯一顶层目录
+    tops = {n.split("/")[0] for n in files if "/" in n}
+    if len(tops) == 1:
+        candidates.append(next(iter(tops)) + "/")
+    for cand in candidates:
+        if all(n.startswith(cand) for n in files):
+            return cand
+    return ""
+
+
 def _extract(zipbytes: bytes, dest_dir: str) -> Tuple[bool, str]:
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
@@ -160,10 +186,10 @@ def _extract(zipbytes: bytes, dest_dir: str) -> Tuple[bool, str]:
     if not any(n.endswith("manifest.json") for n in names):
         return False, "压缩包内未找到 manifest.json，可能不是扩展包"
 
-    # 如果所有文件都在同一个顶层子目录里，则把内容提到根
+    # 如果所有文件都在同一个顶层子目录里（如 metamask-13.58.0/...），
+    # 则把内容提到根，保证 manifest.json 落在目标目录根。
     files = [n for n in names if not n.endswith("/")]
-    prefix = os.path.commonprefix(files) if files else ""
-    strip = prefix if prefix.endswith("/") else ""
+    strip = _common_dir_prefix(files)
 
     for info in z.infolist():
         name = info.filename
@@ -296,7 +322,62 @@ def install_metamask(
                 continue
             _log(f"安装完成: {info}", cb)
             return True, info
-    return False, last_err or "所有来源均失败，请检查网络或手动下载扩展"
+    return False, (
+        last_err
+        or "所有在线来源均失败：请检查网络，或在 GUI「④ 钱包」点「导入本地扩展包」"
+           "选择已下载的 .zip / .crx 文件"
+    )
+
+
+def install_from_local(
+    archive_path: str,
+    target_dir: str = "extensions/metamask",
+    base_dir: str = ".",
+    cb: Progress = None,
+) -> Tuple[bool, str]:
+    """从本地 .zip / .crx 文件安装扩展到 target_dir。返回 (是否成功, 说明)。
+
+    用户自行从 Chrome 应用商店 / GitHub 下载好扩展包后，可用此函数离线导入，
+    不依赖网络。支持 CRX（自动剥离 Cr24 头）和普通 zip。
+    """
+    src = Path(archive_path)
+    if not src.exists():
+        return False, f"文件不存在: {src}"
+    _log(f"读取本地扩展包: {src} ({src.stat().st_size} B)", cb)
+
+    dest = Path(target_dir)
+    if not dest.is_absolute():
+        dest = Path(base_dir) / dest
+    dest = dest.resolve()
+    _log(f"目标目录: {dest}", cb)
+
+    try:
+        data = src.read_bytes()
+    except Exception as exc:
+        return False, f"读取文件失败: {exc}"
+    if len(data) < 1024:
+        return False, f"文件过小（{len(data)} B），可能不是扩展包"
+
+    head = data[:4]
+    if head == b"Cr24":
+        _log("  检测到 CRX 格式，正在剥离头部 ...", cb)
+        zipbytes = _crx_to_zip(data)
+    elif head.startswith(b"PK"):
+        zipbytes = data
+    else:
+        return False, (
+            f"无法识别的文件格式（首字节 {head!r}），"
+            "请选择扩展的 .zip 或 .crx 文件"
+        )
+
+    ok, detail = _extract(zipbytes, str(dest))
+    if not ok:
+        return False, detail
+    ready, info = extension_ready(str(dest))
+    if not ready:
+        return False, info
+    _log(f"导入完成: {info}", cb)
+    return True, info
 
 
 def main(argv: List[str]) -> int:

@@ -19,7 +19,7 @@ from pathlib import Path
 from queue import Empty
 from tkinter import filedialog, messagebox, ttk
 
-APP_TITLE = "x-batch v1.4.3 · ixBrowser 批量推特登录 + 钱包初始化 + 养号"
+APP_TITLE = "x-batch v1.4.4 · ixBrowser 批量推特登录 + 钱包初始化 + 养号"
 
 _WORKDIR = Path(__file__).parent.resolve()
 _STARTUP_LOG = _WORKDIR / "startup_error.log"
@@ -454,6 +454,9 @@ class App(tk.Tk):
         ttk.Button(btn_row, text="⬇ 下载 / 安装 MetaMask", command=self._on_install_extension).pack(
             side=tk.LEFT
         )
+        ttk.Button(
+            btn_row, text="📂 导入本地扩展包", command=self._on_import_extension_local
+        ).pack(side=tk.LEFT, padx=(8, 0))
         self._wallet_ext_status_var = tk.StringVar(value="")
         ttk.Label(btn_row, textvariable=self._wallet_ext_status_var,
                   foreground="#7f8c8d").pack(side=tk.LEFT, padx=8)
@@ -461,11 +464,12 @@ class App(tk.Tk):
         ttk.Label(
             f,
             text=(
-                "提示: 钱包数据保存在每个 ixBrowser 窗口内；扩展目录不要移动，"
-                "否则各窗口里的钱包会重置。已在 ixBrowser 手动装过 MetaMask 的窗口，"
-                "请关闭「自动加载」以免重复。"
+                "提示: 在线下载失败时，可从 Chrome 应用商店或 MetaMask GitHub Release "
+                "自行下载扩展包（.zip / .crx），点「导入本地扩展包」选择即可，无需联网。"
+                "钱包数据保存在每个 ixBrowser 窗口内；扩展目录不要移动，否则各窗口里的"
+                "钱包会重置。已在 ixBrowser 手动装过 MetaMask 的窗口，请关闭「自动加载」以免重复。"
             ),
-            foreground="#7f8c8d", wraplength=420, justify="left",
+            foreground="#7f8c8d", wraplength=440, justify="left",
         ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(10, 0))
         return f
 
@@ -480,7 +484,7 @@ class App(tk.Tk):
         elif ready:
             self._wallet_ext_status_var.set(f"✓ 已就绪：{info}")
         else:
-            self._wallet_ext_status_var.set("⚠ 未安装，点左侧按钮下载")
+            self._wallet_ext_status_var.set("⚠ 未安装：点左侧下载，或「导入本地扩展包」")
 
     def _pick_extension_dir(self) -> None:
         cur = self._wallet_extpath_var.get().strip() or "extensions/metamask"
@@ -519,6 +523,35 @@ class App(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _on_import_extension_local(self) -> None:
+        """让用户选择本地已下载的扩展包（.zip / .crx）离线导入。"""
+        if self._is_running:
+            messagebox.showinfo("提示", "任务运行中，请先停止")
+            return
+        chosen = filedialog.askopenfilename(
+            title="选择 MetaMask 扩展包（.zip / .crx）",
+            filetypes=[("扩展包", "*.zip *.crx"), ("所有文件", "*.*")],
+            initialdir=str(self._workdir),
+        )
+        if not chosen:
+            return
+        target = self._wallet_extpath_var.get().strip() or "extensions/metamask"
+        self._wallet_ext_status_var.set("导入中 ...")
+        self._append_log(f"[INFO] 从本地导入扩展包: {chosen}")
+
+        def worker() -> None:
+            from modules import ext_install
+
+            def cb(msg: str) -> None:
+                self._log_queue.put(f"[EXT] {msg}")
+
+            ok, info = ext_install.install_from_local(
+                chosen, target, base_dir=str(self._workdir), cb=cb
+            )
+            self.after(0, lambda: self._after_install(ok, info))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _after_install(self, ok: bool, info: str) -> None:
         self._refresh_extension_status()
         if ok:
@@ -527,7 +560,8 @@ class App(tk.Tk):
             )
         else:
             messagebox.showerror(
-                "安装失败", info or "请检查网络，或手动把扩展解压到该目录。"
+                "安装失败",
+                info or "请检查网络，或点「导入本地扩展包」选择已下载的 .zip / .crx。",
             )
 
     def _build_random_tab(self, parent: ttk.Widget) -> ttk.Frame:

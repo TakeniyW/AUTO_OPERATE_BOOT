@@ -271,3 +271,93 @@ class ExcelStore:
             key = row.status or "未处理"
             counts[key] = counts.get(key, 0) + 1
         return counts
+
+
+# ---------------------------------------------------------- 模版 / 结果导出
+def create_template(
+    path: str,
+    *,
+    token_column: str = "auth_token",
+    ct0_column: str = "",
+    username_column: str = "账号",
+    password_column: str = "密码",
+    twofa_column: str = "2FA",
+) -> Path:
+    """生成默认格式的登录表：只有表头 + 一页填写说明，用户直接填数据即可。"""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    columns = [("序号", 8)]
+    columns.append((token_column or "auth_token", 64))
+    if ct0_column:
+        columns.append((ct0_column, 40))
+    columns.append((username_column or "账号", 22))
+    columns.append((password_column or "密码", 20))
+    columns.append((twofa_column or "2FA", 56))
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "登录"
+    ws.append([name for name, _ in columns])
+    fill = PatternFill("solid", fgColor="2F5597")
+    for idx, (_, width) in enumerate(columns, start=1):
+        cell = ws.cell(row=1, column=idx)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[get_column_letter(idx)].width = width
+    ws.row_dimensions[1].height = 22
+    ws.freeze_panes = "A2"
+
+    tips = wb.create_sheet("填写说明")
+    tips.column_dimensions["A"].width = 100
+    lines = [
+        "填写说明（本页不参与处理，可删除）",
+        "",
+        "1. 「登录」页第 1 行是表头，请勿修改列名；数据从第 2 行开始逐行填写。",
+        f"2. {token_column or 'auth_token'}：Twitter auth_token，支持 auth_token=xxx、JSON、裸值三种写法。",
+        f"3. {username_column or '账号'} / {password_column or '密码'}：账号密码登录使用；不启用时可留空。",
+        f"4. {twofa_column or '2FA'}：2FA 验证链接或密钥，形如 https://2fa.xdgongju.top/?key=XXXX。",
+        "5. 运行前请关闭 Excel / WPS 中打开的该表，否则结果无法写回原表。",
+        "6. 运行结束后可在「① Excel」点「下载执行结果 Excel」另存副本，原表保持不变。",
+    ]
+    for row, text in enumerate(lines, start=1):
+        tips.cell(row=row, column=1, value=text)
+    tips["A1"].font = Font(bold=True, size=12)
+
+    dest = Path(path)
+    if not dest.suffix:
+        dest = dest.with_suffix(".xlsx")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(dest)
+    log.info("已生成登录模版: %s", dest.resolve())
+    return dest
+
+
+def resolve_result_path(configured: str) -> Path:
+    """返回最近写入的结果表（原表或被占用时生成的 *_results 副本）。"""
+    base = Path(configured)
+    if not base.suffix:
+        base = base.with_suffix(".xlsx")
+    candidates = [base, base.with_name(f"{base.stem}_results{base.suffix}")]
+    existing = [p for p in candidates if p.is_file()]
+    if not existing:
+        raise FileNotFoundError(f"找不到结果表: {base}")
+    return max(existing, key=lambda p: p.stat().st_mtime)
+
+
+def export_copy(source: str, dest: str) -> Path:
+    """把结果表另存为新文件；目标与原表相同时拒绝，确保不改动原表。"""
+    src = Path(source)
+    dst = Path(dest)
+    if not src.is_file():
+        raise FileNotFoundError(f"找不到结果表: {src}")
+    if not dst.suffix:
+        dst = dst.with_suffix(src.suffix or ".xlsx")
+    if src.resolve() == dst.resolve():
+        raise ValueError("另存路径不能与原表相同，请换一个文件名")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    log.info("结果表已另存: %s -> %s", src, dst)
+    return dst

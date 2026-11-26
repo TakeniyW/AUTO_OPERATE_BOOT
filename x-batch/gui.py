@@ -17,7 +17,7 @@ from pathlib import Path
 from queue import Empty
 from tkinter import filedialog, messagebox, ttk
 
-APP_TITLE = "x-batch v1.4.1 · ixBrowser 批量推特登录 + 钱包初始化 + 养号"
+APP_TITLE = "x-batch v1.4.2 · ixBrowser 批量推特登录 + 钱包初始化 + 养号"
 
 _WORKDIR = Path(__file__).parent.resolve()
 _STARTUP_LOG = _WORKDIR / "startup_error.log"
@@ -229,13 +229,24 @@ class App(tk.Tk):
             row=7, column=0, columnspan=3, sticky="w", pady=4
         )
 
+        dl_row = ttk.Frame(f)
+        dl_row.grid(row=8, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Button(
+            dl_row, text="⬇ 下载登录模版", command=self._on_download_template
+        ).pack(side=tk.LEFT)
+        self._download_result_btn = ttk.Button(
+            dl_row, text="⬇ 下载执行结果 Excel", command=self._on_download_result
+        )
+        self._download_result_btn.pack(side=tk.LEFT, padx=(8, 0))
+
         ttk.Label(
             f,
-            text="提示: 只跑 token 时表里只需 token 一列；启用账号密码登录后还需 账号 / 密码 / 2FA。",
+            text="提示: 只跑 token 时表里只需 token 一列；启用账号密码登录后还需 账号 / 密码 / 2FA。\n"
+                 "「下载登录模版」生成标准表头；「下载执行结果 Excel」会另存副本，不改动原表。",
             foreground="#7f8c8d",
-            wraplength=380,
+            wraplength=420,
             justify="left",
-        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(10, 0))
         return f
 
     def _build_ix_tab(self, parent: ttk.Widget) -> ttk.Frame:
@@ -914,6 +925,72 @@ class App(tk.Tk):
         if path:
             self._excel_var.set(path)
 
+    def _on_download_template(self) -> None:
+        """生成默认格式的登录表（表头与当前界面的列名一致）。"""
+        path = filedialog.asksaveasfilename(
+            title="保存登录模版",
+            defaultextension=".xlsx",
+            initialfile="登录模版.xlsx",
+            initialdir=str(self._workdir),
+            filetypes=[("Excel", "*.xlsx")],
+        )
+        if not path:
+            return
+        try:
+            from modules.excel_store import create_template
+
+            dest = create_template(
+                path,
+                token_column=self._token_col_var.get().strip() or "auth_token",
+                ct0_column=self._ct0_col_var.get().strip(),
+                username_column=self._user_col_var.get().strip() or "账号",
+                password_column=self._pwd_col_var.get().strip() or "密码",
+                twofa_column=self._twofa_col_var.get().strip() or "2FA",
+            )
+        except Exception as exc:
+            messagebox.showerror("生成失败", str(exc))
+            return
+        self._append_log(f"[INFO] 已生成登录模版: {dest}")
+        messagebox.showinfo(
+            "模版已生成",
+            f"已保存到:\n{dest}\n\n填好 token / 账号 / 密码 / 2FA 后，"
+            "在上方「token 表路径」选择它即可。",
+        )
+
+    def _on_download_result(self) -> None:
+        """把执行结果表另存一份副本，原表保持不变。"""
+        if self._is_running:
+            messagebox.showinfo("提示", "任务运行中，结果表可能正在写入，请先停止再下载")
+            return
+        configured = self._excel_var.get().strip()
+        if not configured:
+            messagebox.showerror("提示", "请先选择 token 表路径")
+            return
+        try:
+            from modules.excel_store import export_copy, resolve_result_path
+
+            source = resolve_result_path(configured)
+        except Exception as exc:
+            messagebox.showerror("找不到结果表", str(exc))
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="另存执行结果",
+            defaultextension=".xlsx",
+            initialfile=f"{source.stem}_结果{source.suffix}",
+            initialdir=str(source.parent),
+            filetypes=[("Excel", "*.xlsx")],
+        )
+        if not path:
+            return
+        try:
+            dest = export_copy(source, path)
+        except Exception as exc:
+            messagebox.showerror("保存失败", str(exc))
+            return
+        self._append_log(f"[INFO] 执行结果已另存: {source} -> {dest}")
+        messagebox.showinfo("已另存", f"结果已保存到:\n{dest}\n\n原表未改动。")
+
     def _test_ix(self) -> None:
         try:
             s = self._collect_settings()
@@ -1205,12 +1282,14 @@ class App(tk.Tk):
             self._start_btn.config(state=tk.DISABLED)
             self._stop_btn.config(state=tk.NORMAL)
             self._warmup_btn.config(state=tk.DISABLED)
+            self._download_result_btn.config(state=tk.DISABLED)
         else:
             self._status_dot.config(fg=COLOR_IDLE)
             self._status_label.config(text="空闲")
             self._start_btn.config(state=tk.NORMAL)
             self._stop_btn.config(state=tk.DISABLED)
             self._warmup_btn.config(state=tk.NORMAL)
+            self._download_result_btn.config(state=tk.NORMAL)
 
     # ----------------------------------------------------------- 日志刷新
     def _reset_log(self) -> None:
